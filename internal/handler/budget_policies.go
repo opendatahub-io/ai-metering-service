@@ -6,9 +6,9 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/redhat-et/pricetag-metering/internal/api"
-	"github.com/redhat-et/pricetag-metering/internal/store"
-	"github.com/redhat-et/pricetag-metering/internal/utils"
+	"github.com/opendatahub-io/ai-metering-service/internal/api"
+	"github.com/opendatahub-io/ai-metering-service/internal/store"
+	"github.com/opendatahub-io/ai-metering-service/internal/utils"
 )
 
 type BudgetPoliciesHandler struct {

@@ -1,4 +1,4 @@
-# Pricetag Metering
+# AI Metering Service
 
 Usage metering and budget enforcement for AI Gateway. This repository contains two components:
 

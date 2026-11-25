@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/redhat-et/pricetag-metering/internal/accounting"
-	"github.com/redhat-et/pricetag-metering/internal/admission"
-	"github.com/redhat-et/pricetag-metering/internal/api"
-	"github.com/redhat-et/pricetag-metering/internal/store"
+	"github.com/opendatahub-io/ai-metering-service/internal/accounting"
+	"github.com/opendatahub-io/ai-metering-service/internal/admission"
+	"github.com/opendatahub-io/ai-metering-service/internal/api"
+	"github.com/opendatahub-io/ai-metering-service/internal/store"
 )
 
 // recomputeFlags rewrites the admission flags for every (identity, resource)

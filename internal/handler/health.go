@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/redhat-et/pricetag-metering/internal/renewal"
+	"github.com/opendatahub-io/ai-metering-service/internal/renewal"
 )
 
 type HealthHandler struct {

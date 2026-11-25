@@ -2,10 +2,10 @@ package server
 
 import (
 	"github.com/gin-gonic/gin"
-	"github.com/redhat-et/pricetag-metering/internal/config"
-	"github.com/redhat-et/pricetag-metering/internal/handler"
-	"github.com/redhat-et/pricetag-metering/internal/renewal"
-	"github.com/redhat-et/pricetag-metering/internal/store"
+	"github.com/opendatahub-io/ai-metering-service/internal/config"
+	"github.com/opendatahub-io/ai-metering-service/internal/handler"
+	"github.com/opendatahub-io/ai-metering-service/internal/renewal"
+	"github.com/opendatahub-io/ai-metering-service/internal/store"
 )
 
 type Server struct {

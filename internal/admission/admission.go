@@ -9,7 +9,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/redhat-et/pricetag-metering/internal/api"
+	"github.com/opendatahub-io/ai-metering-service/internal/api"
 )
 
 type AdmissionKeys struct {

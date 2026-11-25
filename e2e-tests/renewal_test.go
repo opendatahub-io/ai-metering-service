@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/redhat-et/pricetag-metering/internal/admission"
-	"github.com/redhat-et/pricetag-metering/internal/api"
+	"github.com/opendatahub-io/ai-metering-service/internal/admission"
+	"github.com/opendatahub-io/ai-metering-service/internal/api"
 	goredis "github.com/redis/go-redis/v9"
 )
 

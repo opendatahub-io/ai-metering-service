@@ -1,4 +1,4 @@
-module github.com/redhat-et/pricetag-metering
+module github.com/opendatahub-io/ai-metering-service
 
 go 1.26.0
 

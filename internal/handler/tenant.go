@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/redhat-et/pricetag-metering/internal/api"
+	"github.com/opendatahub-io/ai-metering-service/internal/api"
 )
 
 const tenantHeader = "X-Tenant"

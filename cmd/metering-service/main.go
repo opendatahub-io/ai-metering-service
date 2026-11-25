@@ -8,12 +8,12 @@ import (
 	"log"
 
 	_ "github.com/lib/pq"
-	"github.com/redhat-et/pricetag-metering/internal/config"
-	"github.com/redhat-et/pricetag-metering/internal/renewal"
-	"github.com/redhat-et/pricetag-metering/internal/server"
-	"github.com/redhat-et/pricetag-metering/internal/store"
-	"github.com/redhat-et/pricetag-metering/internal/store/postgres"
-	redisstore "github.com/redhat-et/pricetag-metering/internal/store/redis"
+	"github.com/opendatahub-io/ai-metering-service/internal/config"
+	"github.com/opendatahub-io/ai-metering-service/internal/renewal"
+	"github.com/opendatahub-io/ai-metering-service/internal/server"
+	"github.com/opendatahub-io/ai-metering-service/internal/store"
+	"github.com/opendatahub-io/ai-metering-service/internal/store/postgres"
+	redisstore "github.com/opendatahub-io/ai-metering-service/internal/store/redis"
 	goredis "github.com/redis/go-redis/v9"
 )
 

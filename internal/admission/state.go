@@ -1,6 +1,6 @@
 package admission
 
-import "github.com/redhat-et/pricetag-metering/internal/api"
+import "github.com/opendatahub-io/ai-metering-service/internal/api"
 
 // State is the value of an admission flag: the precomputed admission
 // decision Praxis reads for one (identity object, resource) pair. The Rust

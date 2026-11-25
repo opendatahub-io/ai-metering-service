@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/redhat-et/pricetag-metering/internal/api"
+	"github.com/opendatahub-io/ai-metering-service/internal/api"
 )
 
 // ErrKeyNotFound is returned by KeyStore.GetKey when the key does not exist.

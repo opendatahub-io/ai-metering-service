@@ -1,4 +1,4 @@
--- Pricetag Metering schema.
+-- AI Metering Service schema.
 --
 -- The usage ledger is normalized: `usage` is 1:1 with the CloudEvent and
 -- holds the event-level facts (identity, resource, usage) exactly once;

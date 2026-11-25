@@ -5,12 +5,12 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
-	"github.com/redhat-et/pricetag-metering/internal/admission"
-	"github.com/redhat-et/pricetag-metering/internal/api"
-	"github.com/redhat-et/pricetag-metering/internal/period"
-	"github.com/redhat-et/pricetag-metering/internal/renewal"
-	"github.com/redhat-et/pricetag-metering/internal/store"
-	"github.com/redhat-et/pricetag-metering/internal/utils"
+	"github.com/opendatahub-io/ai-metering-service/internal/admission"
+	"github.com/opendatahub-io/ai-metering-service/internal/api"
+	"github.com/opendatahub-io/ai-metering-service/internal/period"
+	"github.com/opendatahub-io/ai-metering-service/internal/renewal"
+	"github.com/opendatahub-io/ai-metering-service/internal/store"
+	"github.com/opendatahub-io/ai-metering-service/internal/utils"
 )
 
 type BudgetsHandler struct {

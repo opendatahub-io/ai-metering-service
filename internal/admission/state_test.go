@@ -3,7 +3,7 @@ package admission
 import (
 	"testing"
 
-	"github.com/redhat-et/pricetag-metering/internal/api"
+	"github.com/opendatahub-io/ai-metering-service/internal/api"
 )
 
 func TestMostRestrictive(t *testing.T) {

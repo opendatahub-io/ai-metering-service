@@ -5,7 +5,7 @@ import (
 	"errors"
 
 	"github.com/redis/go-redis/v9"
-	"github.com/redhat-et/pricetag-metering/internal/store"
+	"github.com/opendatahub-io/ai-metering-service/internal/store"
 )
 
 type RedisStore struct {

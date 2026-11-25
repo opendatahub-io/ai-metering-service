@@ -4,7 +4,7 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
-	"github.com/redhat-et/pricetag-metering/internal/store"
+	"github.com/opendatahub-io/ai-metering-service/internal/store"
 )
 
 func ParsePagination(c *gin.Context) store.Pagination {
