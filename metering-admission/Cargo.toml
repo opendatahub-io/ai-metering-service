@@ -1,0 +1,8 @@
+[package]
+name = "metering-admission"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+redis = { version = "1.8", features = ["tokio-native-tls-comp"] }
+tokio = { version = "1", features = ["rt"] }

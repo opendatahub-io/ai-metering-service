@@ -1,0 +1,11 @@
+.local/
+metering
+*.exe
+*.test
+*.out
+*.prof
+vendor/
+.env
+
+# Rust
+target/
