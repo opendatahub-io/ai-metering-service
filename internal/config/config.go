@@ -17,6 +17,12 @@ type Config struct {
 	Postgres PostgresConfig `yaml:"postgres"`
 	Redis    RedisConfig    `yaml:"redis"`
 	Renewal  RenewalConfig  `yaml:"renewal"`
+	Catalog  CatalogConfig  `yaml:"catalog"`
+}
+
+type CatalogConfig struct {
+	File     string `yaml:"file"`
+	CostToBu int32  `yaml:"cost_to_bu"`
 }
 
 type TLSConfig struct {

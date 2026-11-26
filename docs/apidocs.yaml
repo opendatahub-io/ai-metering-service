@@ -1,0 +1,1299 @@
+openapi: 3.0.3
+info:
+  title: AI Metering Service API
+  description: |
+    Usage metering and budget enforcement for the AI Gateway (ODH-ADR-0001).
+
+    The service owns the budget object model (rates, budgets, budget
+    policies), the usage ledger, and the admission flags Praxis reads from
+    Redis. All management endpoints are scoped by the `X-Tenant` header;
+    the usage-event ingest derives the tenant from the authenticated
+    caller and rejects payload/header mismatches.
+
+    Costs are expressed in **Budget Units (BU)** — an abstract accounting
+    unit, not a currency. Rate items map usage counters (tokens, seconds,
+    ...) to integer BU per unit.
+  version: 2.0.0
+
+servers:
+  - url: /
+    description: Local / in-cluster
+
+tags:
+  - name: Health
+  - name: Rates
+  - name: Catalog Rates
+  - name: Budgets
+  - name: Budget Policies
+  - name: Usage
+  - name: Events
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Service liveness and renewal loop status
+      description: |
+        Reports service liveness plus the budget renewal and reconcile
+        loops' last-pass status. A `last_sweep_at` or `last_reconcile_at`
+        older than a couple of the respective intervals means that loop is
+        stuck and admission flags are frozen at their last values. A zero
+        timestamp means the pass has not run in this pod yet.
+      operationId: getHealth
+      responses:
+        "200":
+          description: Service is up
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+
+  /api/v1/rates:
+    get:
+      tags: [Rates]
+      summary: List rates
+      operationId: listRates
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Paginated rate list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RateListing"
+        "403":
+          $ref: "#/components/responses/MissingTenant"
+        "500":
+          $ref: "#/components/responses/Internal"
+    post:
+      tags: [Rates]
+      summary: Create a rate
+      description: |
+        Creates a named rate table. Items may be hand-written (resource +
+        costs) or copied from the global catalog: an item carrying only
+        `catalog_rate_ref` has its resource and costs copied verbatim from
+        the catalog entry, and the ref is kept as provenance. The copy is a
+        snapshot — later catalog changes do not reprice existing rates.
+
+        Resource matching is a subset constraint: an item matches an event
+        when every key in the item's resource map equals the event's
+        corresponding key. Keys left out are unconstrained, and an empty
+        resource map is the catch-all. Wildcard values (`"*"`) are rejected
+        — they are redundant with key absence and would silently never
+        match.
+      operationId: createRate
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Rate"
+            examples:
+              handWritten:
+                summary: Hand-written items
+                value:
+                  name: standard
+                  items:
+                    - resource:
+                        model: claude-haiku-4-5
+                        provider: anthropic
+                      costs:
+                        input_tokens: 1000
+                        output_tokens: 5000
+                        cache_read_tokens: 100
+                        cache_write_tokens: 1250
+              fromCatalog:
+                summary: Items copied from the catalog
+                value:
+                  name: team-rate
+                  items:
+                    - catalog_rate_ref: 97d9afb6-b600-434a-af8b-66f1d3812cc7
+                    - resource:
+                        model: my-model
+                      costs:
+                        input_tokens: 1
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RateResource"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/MissingTenant"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+  /api/v1/rates/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Tenant"
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [Rates]
+      summary: Get a rate by id
+      operationId: getRate
+      responses:
+        "200":
+          description: The rate
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RateResource"
+        "403":
+          $ref: "#/components/responses/MissingTenant"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [Rates]
+      summary: Update a rate
+      description: |
+        Replaces the rate's spec. `catalog_rate_ref` items are resolved
+        and copied exactly as on create.
+      operationId: updateRate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Rate"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RateResource"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/MissingTenant"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/Internal"
+    delete:
+      tags: [Rates]
+      summary: Delete a rate
+      operationId: deleteRate
+      responses:
+        "204":
+          description: Deleted
+        "403":
+          $ref: "#/components/responses/MissingTenant"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+  /api/v1/catalog-rates:
+    get:
+      tags: [Catalog Rates]
+      summary: List catalog rates
+      description: |
+        The global pricing catalog — the templates rate items are copied
+        from. Rows are seeded by an external process; this API is
+        read-only. The catalog is global: the tenant header authenticates
+        the caller but does not scope the rows.
+      operationId: listCatalogRates
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - name: provider
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter by the catalog entry's `resource.provider` (exact match).
+        - name: model
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter by `resource.model` (case-insensitive prefix match).
+      responses:
+        "200":
+          description: Paginated catalog
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogRateListing"
+        "403":
+          $ref: "#/components/responses/MissingTenant"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+  /api/v1/catalog-rates/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Tenant"
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [Catalog Rates]
+      summary: Get a catalog rate by id
+      operationId: getCatalogRate
+      responses:
+        "200":
+          description: The catalog entry
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResourceCatalogRate"
+        "403":
+          $ref: "#/components/responses/MissingTenant"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/budgets:
+    get:
+      tags: [Budgets]
+      summary: List budgets
+      operationId: listBudgets
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Paginated budget list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BudgetListing"
+        "403":
+          $ref: "#/components/responses/MissingTenant"
+        "500":
+          $ref: "#/components/responses/Internal"
+    post:
+      tags: [Budgets]
+      summary: Create a budget
+      description: |
+        Creates a pure capacity definition — how much BU and when it
+        resets. No subject, no enforcement, no rates; those attach via
+        budget policies. The opening balance counter in Redis is written at
+        creation.
+      operationId: createBudget
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Budget"
+            examples:
+              monthlyDrain:
+                summary: Monthly drain budget
+                value:
+                  name: team-budget
+                  limit: 1000000
+                  period_start: "2026-11-01T00:00:00Z"
+                  period_duration: P1M
+                  renewal_type: drain
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BudgetResource"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/MissingTenant"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+  /api/v1/budgets/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Tenant"
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [Budgets]
+      summary: Get a budget by id
+      operationId: getBudget
+      responses:
+        "200":
+          description: The budget
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BudgetResource"
+        "403":
+          $ref: "#/components/responses/MissingTenant"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [Budgets]
+      summary: Update a budget
+      description: |
+        Replaces the budget's spec. On a limit change the Redis balance is
+        rebuilt from the ledger so the counter matches the new definition.
+      operationId: updateBudget
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Budget"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BudgetResource"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/MissingTenant"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/Internal"
+    delete:
+      tags: [Budgets]
+      summary: Delete a budget
+      operationId: deleteBudget
+      responses:
+        "204":
+          description: Deleted
+        "403":
+          $ref: "#/components/responses/MissingTenant"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+  /api/v1/budget_policies:
+    get:
+      tags: [Budget Policies]
+      summary: List budget policies
+      operationId: listBudgetPolicies
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Paginated policy list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BudgetPolicyListing"
+        "403":
+          $ref: "#/components/responses/MissingTenant"
+        "500":
+          $ref: "#/components/responses/Internal"
+    post:
+      tags: [Budget Policies]
+      summary: Create a budget policy
+      description: |
+        Binds subjects to a budget with a rate table and optional overage
+        behavior. All subjects in one policy share the budget, rate, and
+        overage configuration; when subjects need different rates or
+        overage, create separate policies.
+
+        Validation: at least one subject with a supported kind and a
+        non-empty name; `budget_ref` and `rate_ref` must resolve within the
+        tenant; only `soft` overage is supported (fallback overage levels
+        are a non-goal); an overage `rate_ref`, when present, must resolve.
+        A subject must not appear in multiple policies that reference the
+        same `budget_ref` with different `rate_ref` values — enforced for
+        the cases provable at write time (literally shared subjects, and
+        tenant-level subjects, which match every identity in the tenant).
+        Cross-level overlaps (a user and a group they belong to) depend on
+        request-time membership and are detected at ingest instead.
+
+        If `overage` is absent, enforcement is hard: requests are rejected
+        with 429 when the budget is exceeded.
+      operationId: createBudgetPolicy
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BudgetPolicy"
+            examples:
+              hardUser:
+                summary: Hard enforcement for two users
+                value:
+                  budget_ref: team-budget
+                  rate_ref: team-rate
+                  subjects:
+                    - kind: user
+                      name: alice
+                    - kind: user
+                      name: bob
+              softTenant:
+                summary: Tenant-wide soft overage
+                value:
+                  budget_ref: tenant-budget
+                  rate_ref: team-rate
+                  subjects:
+                    - kind: tenant
+                      name: acme-corp
+                  overage:
+                    type: soft
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BudgetPolicyResource"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/MissingTenant"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+  /api/v1/budget_policies/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Tenant"
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [Budget Policies]
+      summary: Get a budget policy by id
+      operationId: getBudgetPolicy
+      responses:
+        "200":
+          description: The policy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BudgetPolicyResource"
+        "403":
+          $ref: "#/components/responses/MissingTenant"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [Budget Policies]
+      summary: Update a budget policy
+      description: Replaces the policy's spec. Validation is identical to create.
+      operationId: updateBudgetPolicy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BudgetPolicy"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BudgetPolicyResource"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/MissingTenant"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/Internal"
+    delete:
+      tags: [Budget Policies]
+      summary: Delete a budget policy
+      operationId: deleteBudgetPolicy
+      responses:
+        "204":
+          description: Deleted
+        "403":
+          $ref: "#/components/responses/MissingTenant"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+  /api/v1/usage:
+    get:
+      tags: [Usage]
+      summary: Query aggregated usage
+      description: |
+        The admin/reporting view: aggregated usage over the tenant's
+        ledger, with flexible grouping and time bucketing. Results are
+        scoped by the tenant header.
+
+        The `range`/`from`/`to` parameters define a half-open window
+        [from, to) over event timestamps. With `granularity` other than
+        `total`, each group is additionally bucketed by `date_trunc`.
+      operationId: queryUsage
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+        - name: range
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [24h, 7d, 30d, 90d, 180d, 365d, mtd, qtd, ytd, custom]
+            default: 7d
+          description: |
+            Time window. `mtd`/`qtd`/`ytd` are month/quarter/year-to-date.
+            `custom` requires `from` (and optionally `to`) as dates.
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+          description: Window start (`YYYY-MM-DD`). Required when `range=custom`. Ignored otherwise.
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+          description: |
+            Window end (`YYYY-MM-DD`, exclusive of the remainder of that
+            day). Used only with `range=custom`; defaults to now.
+        - name: group_by
+          in: query
+          required: false
+          schema:
+            type: string
+          description: |
+            Comma-separated dimensions to group by: `model`, `provider`,
+            `user`, `group`, `org`. Omit for flat totals.
+        - name: granularity
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [total, hour, day, week, month]
+            default: total
+          description: Time bucketing. `total` returns one bucket per group.
+        - name: user
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter by user.
+        - name: group
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter by group.
+        - name: org
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter by organization.
+        - name: model
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter by model.
+        - name: provider
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter by provider.
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Aggregated usage
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UsageResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/MissingTenant"
+    delete:
+      tags: [Usage]
+      summary: Delete all usage for the tenant (debug only)
+      description: |
+        Enabled only when the service runs with `--debug`. Drops the
+        tenant's usage ledger rows.
+      operationId: deleteAllUsage
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+      responses:
+        "200":
+          description: Number of rows deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted:
+                    type: integer
+                    format: int64
+        "403":
+          $ref: "#/components/responses/MissingTenant"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+  /api/v1/usage/me:
+    get:
+      tags: [Usage]
+      summary: Query the caller's own usage
+      description: |
+        A self-scoped view of the same aggregation: the caller's identity
+        is taken from the request, so no `user`/`group`/`org` filters
+        apply and those dimensions are not allowed in `group_by` — this
+        endpoint never exposes other users' usage. Accepts the same
+        `range`, `from`, `to`, `group_by`, `granularity`, `model`,
+        `provider`, `limit` and `offset` parameters as the main usage
+        query.
+      operationId: queryMyUsage
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+        - name: range
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [24h, 7d, 30d, 90d, 180d, 365d, mtd, qtd, ytd, custom]
+            default: 7d
+          description: Time window; see `GET /api/v1/usage`.
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+          description: Window start; required with `range=custom`.
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+          description: Window end; used with `range=custom`.
+        - name: group_by
+          in: query
+          required: false
+          schema:
+            type: string
+          description: |
+            Comma-separated dimensions; `model` and `provider` only — the
+            identity dimensions (`user`, `group`, `org`) are rejected.
+        - name: granularity
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [total, hour, day, week, month]
+            default: total
+          description: Time bucketing.
+        - name: model
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter by model.
+        - name: provider
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter by provider.
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: The caller's aggregated usage
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UsageResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/MissingTenant"
+
+  /api/v1/events:
+    post:
+      tags: [Events]
+      summary: Ingest a usage CloudEvent
+      description: |
+        The accounting input: a CloudEvents v1.0 usage event, transformed
+        from the OTEL log Praxis emits after each inference response. The
+        service resolves the applicable budgets from the identity, prices
+        the usage, persists it to the ledger, decrements balances, and
+        recomputes admission flags.
+
+        The tenant is derived from the authenticated caller (the `X-Tenant`
+        header today); `data.identity.tenant` must agree with it or the
+        event is rejected. `data.identity.user` and `data.identity.tenant`
+        are required. Delivery is idempotent on the CloudEvent `id`: a
+        redelivered event never charges twice, and a partially settled
+        event completes its remaining budgets on retry.
+
+        The event carries facts, never prices — pricing happens here, so
+        rate changes apply to the next event without any payload change.
+      operationId: ingestEvent
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CloudEvent"
+            examples:
+              usage:
+                summary: Inference usage event
+                value:
+                  specversion: "1.0"
+                  id: evt-7f3a2b1c-4d5e-6f78-9a0b-1c2d3e4f5678
+                  source: praxis/praxis-pod-abc-0
+                  type: io.opendatahub.aigateway.usage.v1
+                  time: "2026-11-26T14:32:05.123Z"
+                  datacontenttype: application/json
+                  data:
+                    request_id: req-abc123
+                    identity:
+                      user: alice
+                      groups: [engineering, ml-team]
+                      organization: research
+                      tenant: acme-corp
+                    resource:
+                      model: claude-haiku-4-5
+                      provider: anthropic
+                    usage:
+                      input_tokens: 312
+                      output_tokens: 87
+                      cache_read_tokens: 20
+                      cache_write_tokens: 5
+                      reasoning_tokens: 30
+      responses:
+        "204":
+          description: Ingested and accounted
+        "400":
+          description: |
+            Malformed body, unsupported `specversion`, missing required
+            CloudEvent or identity fields, or a payload tenant that
+            disagrees with the authenticated tenant.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          $ref: "#/components/responses/MissingTenant"
+        "500":
+          $ref: "#/components/responses/Internal"
+
+components:
+  parameters:
+    Tenant:
+      name: X-Tenant
+      in: header
+      required: true
+      schema:
+        type: string
+      description: |
+        The tenant scope for the request. Every `/api/v1` endpoint requires
+        it; a missing header is rejected with 403. For event ingest the
+        tenant is binding: the payload's `data.identity.tenant` must match.
+    Id:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Resource id (UUID).
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        default: 100
+        minimum: 1
+      description: Page size. Non-positive values fall back to 100.
+    Offset:
+      name: offset
+      in: query
+      required: false
+      schema:
+        type: integer
+        default: 0
+        minimum: 0
+      description: Page offset. Negative values fall back to 0.
+
+  responses:
+    MissingTenant:
+      description: Missing X-Tenant header
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            code: missing_tenant
+            message: missing X-Tenant header
+    BadRequest:
+      description: Invalid request — validation error with details
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Resource not found within the tenant
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Internal:
+      description: Server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        code:
+          type: string
+          description: Stable machine-readable error code (e.g. `bad_request`, `invalid_budget_policy`, `tenant_mismatch`).
+        message:
+          type: string
+          description: Human-readable details.
+
+    Health:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        service:
+          type: string
+          example: MeteringService
+        renewal:
+          type: object
+          properties:
+            last_sweep_at:
+              type: string
+              format: date-time
+              description: Last renewal sweep; zero means not yet run in this pod.
+            renewed:
+              type: integer
+              description: Budgets renewed in the last sweep.
+            interval:
+              type: string
+              description: Sweep interval (Go duration).
+            last_reconcile_at:
+              type: string
+              format: date-time
+              description: Last reconcile pass; zero means not yet run in this pod.
+            reconciled:
+              type: integer
+              description: Budgets reconciled in the last pass.
+            reconcile_interval:
+              type: string
+              description: Reconcile interval (Go duration).
+            error:
+              type: string
+              description: Present when the last sweep failed.
+            reconcile_error:
+              type: string
+              description: Present when the last reconcile failed.
+
+    RateItem:
+      type: object
+      properties:
+        resource:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Resource matching keys (e.g. `model`, `provider`,
+            `modality`). An item matches an event when every one of its
+            keys equals the event's corresponding key — keys left out are
+            unconstrained, and an empty map is the catch-all. Wildcard
+            values are rejected: leave the key out instead.
+        costs:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+          description: |
+            Integer BU per usage unit, keyed by usage counter (e.g.
+            `input_tokens`, `output_tokens`, `cache_read_tokens`,
+            `cache_write_tokens`, `reasoning_tokens`). The well-known token
+            keys match the counters Praxis emits; any key present in both
+            the costs map and the event's usage contributes
+            `usage[key] * costs[key]` to the charge.
+        catalog_rate_ref:
+          type: string
+          description: |
+            Provenance: the `resource_rates_catalog` row this item was
+            copied from. On create/update, an item carrying only this
+            field gets its resource and costs copied verbatim from the
+            catalog entry. Kept alongside the copied values so a later
+            refresh can re-copy. Ignored by matching — never affects
+            pricing. Empty on hand-written items.
+
+    Rate:
+      type: object
+      required: [name, items]
+      properties:
+        name:
+          type: string
+          description: Unique rate name within the tenant.
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/RateItem"
+          description: Rate items; the most specific matching item prices an event.
+
+    Metadata:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Server-assigned UUID.
+        tenant_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    RateResource:
+      type: object
+      properties:
+        metadata:
+          $ref: "#/components/schemas/Metadata"
+        spec:
+          $ref: "#/components/schemas/Rate"
+
+    RateListing:
+      type: object
+      properties:
+        limit:
+          type: integer
+        offset:
+          type: integer
+        total:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/RateResource"
+
+    CatalogRate:
+      type: object
+      properties:
+        resource:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            The resource identity this entry prices (any dimensions:
+            model, provider, modality, ...). Shaped exactly like a
+            RateItem's resource, so a copied rate item is a verbatim copy.
+            Every dimension present becomes a required match key in
+            copies — an entry must only carry dimensions the events
+            actually carry.
+        costs:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+          description: Integer BU per usage unit.
+
+    ResourceCatalogRate:
+      type: object
+      properties:
+        metadata:
+          $ref: "#/components/schemas/Metadata"
+        spec:
+          $ref: "#/components/schemas/CatalogRate"
+
+    CatalogRateListing:
+      type: object
+      properties:
+        limit:
+          type: integer
+        offset:
+          type: integer
+        total:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ResourceCatalogRate"
+
+    Budget:
+      type: object
+      required: [name, limit, period_start, period_duration, renewal_type]
+      properties:
+        name:
+          type: string
+          description: Unique budget name within the tenant.
+        limit:
+          type: integer
+          format: int64
+          description: BU capacity per period. Balances may go negative — that is overage, not an error.
+        period_start:
+          type: string
+          format: date-time
+          description: UTC anchor for period calculation.
+        period_duration:
+          type: string
+          description: |
+            ISO 8601 duration (e.g. `P1M`, `P3M`, `P7D`). Validated at
+            create and update.
+        renewal_type:
+          type: string
+          enum: [drain, rollover]
+          description: |
+            `drain` resets the balance to the limit each period (use it or
+            lose it); `rollover` carries unused BU forward, optionally
+            capped by `max_carry`.
+        max_carry:
+          type: integer
+          format: int64
+          nullable: true
+          description: "Maximum rollover BU. Only meaningful with `renewal_type: rollover`."
+
+    BudgetResource:
+      type: object
+      properties:
+        metadata:
+          $ref: "#/components/schemas/Metadata"
+        spec:
+          $ref: "#/components/schemas/Budget"
+
+    BudgetListing:
+      type: object
+      properties:
+        limit:
+          type: integer
+        offset:
+          type: integer
+        total:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/BudgetResource"
+
+    Subject:
+      type: object
+      required: [kind, name]
+      properties:
+        kind:
+          type: string
+          enum: [user, group, organization, tenant]
+          description: |
+            Identity kind. The values are also the Redis admission key
+            segments. A `tenant` subject matches every identity in the
+            tenant.
+        name:
+          type: string
+          description: Identity of the subject (user, group, organization, or tenant name).
+
+    OverageConfig:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [soft]
+          description: |
+            Only `soft` overage is supported: continue charging the budget
+            past the limit (optionally at a different rate) and admit
+            requests with the over-budget signal. Absent `overage` on the
+            policy means hard enforcement — 429 when the budget is
+            exceeded.
+        rate_ref:
+          type: string
+          description: Optional rate table applied while in overage.
+
+    BudgetPolicy:
+      type: object
+      required: [budget_ref, rate_ref, subjects]
+      properties:
+        budget_ref:
+          type: string
+          description: References a budget by name; must resolve within the tenant.
+        rate_ref:
+          type: string
+          description: |
+            References a rate by name; controls BU pricing for all
+            subjects in this policy. Two policies sharing a budget must
+            use the same rate_ref.
+        subjects:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/Subject"
+          description: |
+            Subjects bound to the budget. All share the budget, rate, and
+            overage configuration (Kubernetes RoleBinding-style); create
+            separate policies for per-subject customization.
+        overage:
+          allOf:
+            - $ref: "#/components/schemas/OverageConfig"
+          description: Overage behavior when the budget is exhausted. Absent means hard enforcement.
+        deduct_overage:
+          type: boolean
+          default: false
+          description: |
+            If true, the previous period's overage is deducted from the
+            next period's opening balance, so overspend reduces future
+            capacity instead of being forgiven.
+
+    BudgetPolicyResource:
+      type: object
+      properties:
+        metadata:
+          $ref: "#/components/schemas/Metadata"
+        spec:
+          $ref: "#/components/schemas/BudgetPolicy"
+
+    BudgetPolicyListing:
+      type: object
+      properties:
+        limit:
+          type: integer
+        offset:
+          type: integer
+        total:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/BudgetPolicyResource"
+
+    UsageResult:
+      type: object
+      properties:
+        range:
+          type: object
+          properties:
+            from:
+              type: string
+            to:
+              type: string
+          description: The resolved window (dates).
+        granularity:
+          type: string
+        group_by:
+          type: array
+          items:
+            type: string
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/UsageBucket"
+          description: Always returned, even with a single element.
+
+    UsageBucket:
+      type: object
+      properties:
+        bucket:
+          type: string
+          description: |
+            Present only when granularity is not `total`. ISO timestamp
+            for `hour`, date for `day`, and so on.
+        dimensions:
+          type: object
+          additionalProperties:
+            type: string
+          description: Only the fields specified in group_by; empty map when omitted.
+        requests:
+          type: integer
+          format: int64
+          description: Number of usage events in this bucket/group.
+        usage:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+          description: Aggregated usage counters (e.g. token counts), keyed by usage key.
+        bu_cost:
+          type: integer
+          format: int64
+          description: Total BU charged in this bucket/group.
+
+    CloudEvent:
+      type: object
+      required: [specversion, id, source, type, time, data]
+      properties:
+        specversion:
+          type: string
+          enum: ["1.0"]
+          description: CloudEvents specification version; only 1.0 is accepted.
+        id:
+          type: string
+          description: |
+            Unique event identifier — the idempotency key. A redelivered
+            event never charges twice.
+        source:
+          type: string
+          description: Originating Praxis instance.
+        type:
+          type: string
+          description: Event type — `io.opendatahub.aigateway.usage.v1`.
+        time:
+          type: string
+          format: date-time
+          description: When the request completed.
+        datacontenttype:
+          type: string
+          description: Content type of `data`; `application/json`.
+        data:
+          $ref: "#/components/schemas/CloudEventData"
+
+    CloudEventData:
+      type: object
+      required: [identity, resource, usage]
+      properties:
+        request_id:
+          type: string
+          description: Request identifier for correlation.
+        identity:
+          type: object
+          required: [user, tenant]
+          properties:
+            user:
+              type: string
+              description: The authenticated user identity.
+            groups:
+              type: array
+              items:
+                type: string
+              description: Groups the user belongs to (request-time only).
+            organization:
+              type: string
+              description: Organization the user belongs to.
+            tenant:
+              type: string
+              description: Must match the authenticated tenant, or the event is rejected.
+        resource:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Dynamic resource keys (e.g. `model`, `provider`) matched
+            against rate items. Must be the same map Praxis used for the
+            admission read — flags are keyed by its hash.
+        usage:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+          description: |
+            Dynamic usage counters (e.g. `input_tokens`,
+            `output_tokens`, `cache_read_tokens`, `cache_write_tokens`,
+            `reasoning_tokens`) multiplied by the matched rate item's
+            costs to compute the BU charge.

@@ -8,6 +8,7 @@ import (
 	"log"
 
 	_ "github.com/lib/pq"
+	"github.com/opendatahub-io/ai-metering-service/internal/catalog"
 	"github.com/opendatahub-io/ai-metering-service/internal/config"
 	"github.com/opendatahub-io/ai-metering-service/internal/renewal"
 	"github.com/opendatahub-io/ai-metering-service/internal/server"
@@ -40,6 +41,14 @@ func main() {
 			log.Printf("renewal sweep stopped: %v", err)
 		}
 	}()
+
+	if cfg.Catalog.File != "" {
+		loader := &catalog.FileLoader{File: cfg.Catalog.File}
+		err := catalog.ImportCatalog(loader, cfg, store)
+		if err != nil {
+			log.Printf("catalog import failed — continuing without importing catalog: %v", err)
+		}
+	}
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	srv := server.New(cfg, store, redis, renewer)
