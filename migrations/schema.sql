@@ -51,6 +51,12 @@ CREATE TABLE budget_policies (
 );
 
 CREATE INDEX idx_budget_policies_tenant ON budget_policies (tenant_id);
+-- Backs FindPoliciesForIdentity's per-event `subjects @>` lookups: a GIN
+-- index makes each containment condition an index scan (combined via
+-- BitmapOr) instead of filtering every policy row in the tenant. The
+-- jsonb_path_ops opclass is smaller and faster than the default jsonb_ops
+-- and supports the containment operator these queries use exclusively.
+CREATE INDEX idx_budget_policies_subjects ON budget_policies USING GIN (subjects jsonb_path_ops);
 
 -- Event-level facts, one row per CloudEvent.
 CREATE TABLE usage (
