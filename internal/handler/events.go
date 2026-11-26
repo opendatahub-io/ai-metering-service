@@ -65,10 +65,12 @@ func (h *EventsHandler) Ingest(c *gin.Context) {
 	// decrement balance counters. Balances may go negative — that is
 	// overage, not an error. Each charge's row is inserted immediately
 	// before its decrement, so a retried CloudEvent (duplicate) never
-	// charges twice, and duplicate charges are excluded from the flag
-	// recompute below.
-	var accounted []accounting.ResolvedCharge
-	balances := make(map[string]int64) // budget ref -> balance after all decrements
+	// charges twice. A rejected insert means either a redelivery or
+	// another policy resolving to the same budget — the ledger row and the
+	// balance must move once either way; the flag fold below still covers
+	// every matching policy's identity objects.
+	balances := make(map[string]int64)    // budget ref -> balance after all decrements
+	chargedCost := make(map[string]int64) // budget ref -> BUCost applied by the winning charge
 	if len(charges) > 0 {
 		record := &api.UsageRecord{
 			TenantID:  tenantID,
@@ -101,7 +103,19 @@ func (h *EventsHandler) Ingest(c *gin.Context) {
 				return
 			}
 			if !inserted {
-				log.Printf("duplicate event %s for budget %s, skipping", event.ID, charge.Policy.Spec.BudgetRef)
+				// An overlapping policy is distinguishable from a redelivery
+				// here: its charge was resolved in this same pass, so the
+				// winning cost is known. Equal costs are benign — either
+				// rate prices the event identically. Differing costs mean
+				// two policies share this budget with different rates, and
+				// the earlier one priced the event: an ambiguous
+				// configuration the operator must resolve.
+				if cost, ok := chargedCost[charge.Policy.Spec.BudgetRef]; ok && cost != charge.BUCost {
+					log.Printf("WARNING: ambiguous pricing for event %s: budget %s charged %d BU by an earlier matching policy, but policy %s (rate %s) computes %d BU for the same usage — two policies share this budget with different rates; align their rate_refs",
+						event.ID, charge.Policy.Spec.BudgetRef, cost,
+						charge.Policy.Metadata.ID, charge.Policy.Spec.RateRef, charge.BUCost)
+				}
+				log.Printf("event %s already charged budget %s (redelivery or overlapping policy), skipping ledger row and balance update", event.ID, charge.Policy.Spec.BudgetRef)
 				continue
 			}
 
@@ -113,20 +127,31 @@ func (h *EventsHandler) Ingest(c *gin.Context) {
 				return
 			}
 			balances[charge.Policy.Spec.BudgetRef] = remaining
+			chargedCost[charge.Policy.Spec.BudgetRef] = charge.BUCost
 			if remaining < 0 {
 				log.Printf("overage for event %s budget %s: %d", event.ID, charge.Policy.Spec.BudgetRef, remaining)
 			}
-			accounted = append(accounted, charge)
 		}
 	}
 
 	// Pass 2 — fold: one admission state per key, most restrictive across
-	// every accounted charge that carries it (deny > over > allow). Folding
-	// after all decrements keeps the outcome independent of charge order and
-	// correct when several charges share a budget or a key.
+	// every resolved charge that carries it (deny > over > allow). The fold
+	// iterates all resolved charges, not just the ones whose ledger row was
+	// inserted: two policies sharing a budget collapse to a single
+	// decrement, but the state derives from that budget's post-decrement
+	// balance, so every identity object any matching policy names still
+	// gets its flag rewritten, under its own policy's overage semantics.
+	// Folding after all decrements keeps the outcome independent of charge
+	// order. The balances membership check keeps a full redelivery a no-op:
+	// no budget was decremented, so no flags are written and the first
+	// delivery's writes stand.
 	states := make(map[string]admission.State)
-	for _, charge := range accounted {
-		state := admission.StateForBalance(balances[charge.Policy.Spec.BudgetRef], charge.Policy.Spec.Overage)
+	for _, charge := range charges {
+		balance, ok := balances[charge.Policy.Spec.BudgetRef]
+		if !ok {
+			continue
+		}
+		state := admission.StateForBalance(balance, charge.Policy.Spec.Overage)
 		for _, key := range charge.AdmissionKeys {
 			states[key] = admission.MostRestrictive(states[key], state)
 		}

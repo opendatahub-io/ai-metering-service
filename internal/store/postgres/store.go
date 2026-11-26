@@ -436,10 +436,18 @@ func (s *PGStore) FindPoliciesForIdentity(ctx context.Context, tenantID string, 
 		return nil, nil
 	}
 
+	// The order is a pricing decision: when several policies matching an
+	// identity share a budget, the first charge to insert its
+	// (usage_id, budget_ref) row prices the event, so an unspecified order
+	// would let planner artifacts (plan flips, vacuum, parallel scans)
+	// change which rate applies. created_at, id makes the winner a
+	// function of the configuration alone: the oldest policy for a budget
+	// prices its events, and only a configuration change can change that.
 	q := `SELECT id, tenant_id, budget_ref, rate_ref, subjects, overage,
 	             deduct_overage, created_at, updated_at
 	      FROM budget_policies
-	      WHERE tenant_id = $1 AND (` + strings.Join(conditions, " OR ") + `)`
+	      WHERE tenant_id = $1 AND (` + strings.Join(conditions, " OR ") + `)
+	      ORDER BY created_at, id`
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {

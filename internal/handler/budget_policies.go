@@ -44,7 +44,7 @@ func (h *BudgetPoliciesHandler) Create(c *gin.Context) {
 		return
 	}
 	tenantID := getTenantID(c)
-	if err := h.validate(c.Request.Context(), tenantID, &policy); err != nil {
+	if err := h.validate(c.Request.Context(), tenantID, "", &policy); err != nil {
 		c.JSON(http.StatusBadRequest, err)
 		return
 	}
@@ -63,7 +63,7 @@ func (h *BudgetPoliciesHandler) Update(c *gin.Context) {
 		return
 	}
 	tenantID := getTenantID(c)
-	if err := h.validate(c.Request.Context(), tenantID, &policy); err != nil {
+	if err := h.validate(c.Request.Context(), tenantID, c.Param("id"), &policy); err != nil {
 		c.JSON(http.StatusBadRequest, err)
 		return
 	}
@@ -79,8 +79,10 @@ func (h *BudgetPoliciesHandler) Update(c *gin.Context) {
 // must resolve within the tenant, and only soft overage is supported —
 // fallback levels (group, organization, tenant) are a non-goal for the
 // initial implementation. An overage rate_ref, when present, must also
-// resolve.
-func (h *BudgetPoliciesHandler) validate(ctx context.Context, tenantID string, policy *api.BudgetPolicy) *api.Error {
+// resolve. selfID is the policy's own id on update (empty on create) and is
+// excluded from the conflicting-rate check so a policy never conflicts with
+// itself.
+func (h *BudgetPoliciesHandler) validate(ctx context.Context, tenantID, selfID string, policy *api.BudgetPolicy) *api.Error {
 	if len(policy.Subjects) == 0 {
 		return api.NewError(api.ErrInvalidBudgetPolicy, "at least one subject is required")
 	}
@@ -110,6 +112,58 @@ func (h *BudgetPoliciesHandler) validate(ctx context.Context, tenantID string, p
 			if _, err := h.store.GetRate(ctx, tenantID, policy.Overage.RateRef); err != nil {
 				return api.NewError(api.ErrInvalidBudgetPolicy,
 					fmt.Sprintf("overage rate_ref %q does not resolve to an existing rate", policy.Overage.RateRef))
+			}
+		}
+	}
+	if err := h.conflictingRate(ctx, tenantID, selfID, policy); err != nil {
+		return err
+	}
+	return nil
+}
+
+// conflictingRate enforces the ADR's policy-creation rule — a subject must
+// not appear in multiple policies that reference the same budget_ref with
+// different rate_refs — for the two cases visible at write time: literally
+// shared subject entries, and a tenant-level subject, which matches every
+// identity in the tenant and therefore overlaps every other policy for the
+// same budget. Cross-level overlaps (a user and a group they belong to)
+// depend on request-time membership and cannot be validated here; ingest
+// emits a warning when they collide with different computed costs.
+func (h *BudgetPoliciesHandler) conflictingRate(ctx context.Context, tenantID, selfID string, policy *api.BudgetPolicy) *api.Error {
+	existing, err := h.store.FindPoliciesForBudget(ctx, tenantID, policy.BudgetRef)
+	if err != nil {
+		return api.NewError(api.ErrCannotListBudgetPolicies, "failed to check policies for conflicting rates")
+	}
+
+	// matchesEverything reports a subject that matches every identity in
+	// the tenant: a live tenant subject. A tenant subject naming another
+	// tenant never matches an identity here, so it cannot overlap anything.
+	matchesEverything := func(s api.Subject) bool {
+		return s.Kind == api.SubjectKindTenant && s.Name == tenantID
+	}
+	// live reports whether a subject can match identities in this tenant.
+	live := func(s api.Subject) bool {
+		return s.Kind != api.SubjectKindTenant || matchesEverything(s)
+	}
+
+	for _, other := range existing {
+		if other.Metadata.ID == selfID {
+			continue // the policy being updated never conflicts with itself
+		}
+		if other.Spec.RateRef == policy.RateRef {
+			continue // same rate: any overlap prices the event identically
+		}
+		for _, mine := range policy.Subjects {
+			for _, theirs := range other.Spec.Subjects {
+				if !live(mine) || !live(theirs) {
+					continue
+				}
+				if mine != theirs && !matchesEverything(mine) && !matchesEverything(theirs) {
+					continue // overlap not provable at write time (e.g. user vs group)
+				}
+				return api.NewError(api.ErrInvalidBudgetPolicy,
+					fmt.Sprintf("subject %s:%s is also covered by policy %s, which references budget %q with rate %q while this policy uses %q: policies sharing a budget must use the same rate_ref",
+						mine.Kind, mine.Name, other.Metadata.ID, policy.BudgetRef, other.Spec.RateRef, policy.RateRef))
 			}
 		}
 	}
