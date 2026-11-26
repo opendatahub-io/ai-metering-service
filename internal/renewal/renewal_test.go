@@ -216,7 +216,7 @@ func recomputeFixture(t *testing.T, balances map[string]int64, policies []api.Bu
 		policies: policies,
 		rates: map[string]*api.RateResource{
 			"rate-1": {Spec: api.Rate{Name: "rate-1", Items: []api.RateItem{{
-				Resource: map[string]string{"model": "*"},
+				Resource: map[string]string{},
 				Costs:    map[string]int64{"input_tokens": 1},
 			}}}},
 		},
@@ -400,7 +400,7 @@ func TestRecomputeFlags_RateMismatchLeavesFlagUntouched(t *testing.T) {
 			Subjects:  []api.Subject{{Kind: api.SubjectKindUser, Name: "alice"}},
 		},
 	}}
-	resource := map[string]string{"model": "granite"} // rate-1 matches "*" — override below
+	resource := map[string]string{"model": "granite"} // rate-1 is the catch-all — override below
 	s, kv := recomputeFixture(t, map[string]int64{"budget-1": -10}, policies)
 	// Replace the wildcard rate with one that only covers another model.
 	s.rates["rate-1"] = &api.RateResource{
@@ -509,7 +509,7 @@ func TestRecomputeFlags_RebuildsMissingBalance(t *testing.T) {
 	budget := api.Budget{Limit: 300, RenewalType: api.RenewalDrain}
 	s, kv := rebuildFixture(t, budget, policies, 0, 600) // current period spent 600 → -300
 	s.rates["rate-1"] = &api.RateResource{Spec: api.Rate{Name: "rate-1", Items: []api.RateItem{{
-		Resource: map[string]string{"model": "*"},
+		Resource: map[string]string{},
 		Costs:    map[string]int64{"input_tokens": 1},
 	}}}}
 

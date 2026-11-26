@@ -16,7 +16,7 @@ func TestEvents_Ingest100(t *testing.T) {
 		"name": "e2e-events-rate",
 		"items": []map[string]any{
 			{
-				"resource": map[string]string{"model": "*", "provider": "*"},
+				"resource": map[string]string{},
 				"costs":    map[string]int64{"input_tokens": 3, "output_tokens": 15, "cache_read_tokens": 1, "cache_write_tokens": 4, "reasoning_tokens": 15},
 			},
 		},

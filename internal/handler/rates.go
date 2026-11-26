@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -41,6 +42,10 @@ func (h *RatesHandler) Create(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, api.NewError(api.ErrBadRequest, err.Error()))
 		return
 	}
+	if err := validateRate(&rate); err != nil {
+		c.JSON(http.StatusBadRequest, err)
+		return
+	}
 	res, err := h.store.CreateRate(c.Request.Context(), getTenantID(c), &rate)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, api.NewError(api.ErrCannotCreateRate, "failed to create rate"))
@@ -53,6 +58,10 @@ func (h *RatesHandler) Update(c *gin.Context) {
 	var rate api.Rate
 	if err := c.ShouldBindJSON(&rate); err != nil {
 		c.JSON(http.StatusBadRequest, api.NewError(api.ErrBadRequest, err.Error()))
+		return
+	}
+	if err := validateRate(&rate); err != nil {
+		c.JSON(http.StatusBadRequest, err)
 		return
 	}
 	res, err := h.store.UpdateRate(c.Request.Context(), getTenantID(c), c.Param("id"), &rate)
@@ -69,4 +78,21 @@ func (h *RatesHandler) Delete(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// validateRate rejects wildcard resource values. Resource matching is a
+// subset constraint: an unconstrained dimension is expressed by leaving the
+// key out of the item's resource map, and an empty resource map is the
+// catch-all — a "*" value has no matching semantics and would silently never
+// match (the matcher compares values literally), so it must not be stored.
+func validateRate(rate *api.Rate) *api.Error {
+	for _, item := range rate.Items {
+		for key, value := range item.Resource {
+			if value == "*" {
+				return api.NewError(api.ErrBadRequest,
+					fmt.Sprintf("wildcard values are not supported: resource key %q must name a concrete value; leave the key out to leave that dimension unconstrained, or use an empty resource map as the catch-all", key))
+			}
+		}
+	}
+	return nil
 }

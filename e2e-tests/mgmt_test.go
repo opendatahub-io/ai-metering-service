@@ -334,7 +334,7 @@ func TestBudgetPolicies_CRUD(t *testing.T) {
 		"name": "policy-test-rate",
 		"items": []map[string]any{
 			{
-				"resource": map[string]string{"model": "*", "provider": "*"},
+				"resource": map[string]string{},
 				"costs":    map[string]int64{"input_tokens": 1, "output_tokens": 1},
 			},
 		},
@@ -417,7 +417,7 @@ func TestBudgetPolicies_SoftOverage(t *testing.T) {
 		"name": "overage-test-rate",
 		"items": []map[string]any{
 			{
-				"resource": map[string]string{"model": "*", "provider": "*"},
+				"resource": map[string]string{},
 				"costs":    map[string]int64{"input_tokens": 3, "output_tokens": 15},
 			},
 		},
@@ -510,7 +510,7 @@ func TestTenantIsolation(t *testing.T) {
 		"name": "tenant-isolation-rate",
 		"items": []map[string]any{
 			{
-				"resource": map[string]string{"model": "*", "provider": "*"},
+				"resource": map[string]string{},
 				"costs":    map[string]int64{"input_tokens": 1, "output_tokens": 1},
 			},
 		},

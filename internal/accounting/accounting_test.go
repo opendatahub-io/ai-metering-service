@@ -192,11 +192,11 @@ func TestResolveCharges_MultiplePoliciesChargedIndependently(t *testing.T) {
 		},
 		rates: map[string]*api.RateResource{
 			"rate-bu": rate("rate-bu", api.RateItem{
-				Resource: map[string]string{"model": "*"},
+				Resource: map[string]string{},
 				Costs:    map[string]int64{"input_tokens": 3, "output_tokens": 15},
 			}),
 			"rate-tokens": rate("rate-tokens", api.RateItem{
-				Resource: map[string]string{"model": "*"},
+				Resource: map[string]string{},
 				Costs:    map[string]int64{"input_tokens": 1, "output_tokens": 1},
 			}),
 		},
@@ -243,7 +243,7 @@ func TestResolveCharges_MixedSubjectsPartialMatch(t *testing.T) {
 		},
 		rates: map[string]*api.RateResource{
 			"rate-1": rate("rate-1", api.RateItem{
-				Resource: map[string]string{"model": "*"},
+				Resource: map[string]string{},
 				Costs:    map[string]int64{"input_tokens": 1},
 			}),
 		},
@@ -275,7 +275,7 @@ func TestResolveCharges_GroupAndOrgPolicies(t *testing.T) {
 		},
 		rates: map[string]*api.RateResource{
 			"rate-1": rate("rate-1", api.RateItem{
-				Resource: map[string]string{"model": "*"},
+				Resource: map[string]string{},
 				Costs:    map[string]int64{"input_tokens": 2},
 			}),
 		},
@@ -295,9 +295,10 @@ func TestResolveCharges_GroupAndOrgPolicies(t *testing.T) {
 		tenantKey("organization", "research", event.Data.Resource))
 }
 
-func TestResolveCharges_WildcardVsExactRateItem(t *testing.T) {
-	// The rate offers a wildcard item and an exact item for the event's
-	// model; the exact one (fewer wildcards) must price the charge.
+func TestResolveCharges_CatchAllVsExactRateItem(t *testing.T) {
+	// The rate offers a catch-all item (empty resource map) and an exact
+	// item for the event's model; the exact one (more keys, tighter
+	// constraint set) must price the charge.
 	s := &fakeStore{
 		policies: []api.BudgetPolicyResource{
 			policy("p1", "budget-1", "rate-1", api.Subject{Kind: api.SubjectKindTenant, Name: "acme-corp"}),
@@ -305,7 +306,7 @@ func TestResolveCharges_WildcardVsExactRateItem(t *testing.T) {
 		rates: map[string]*api.RateResource{
 			"rate-1": rate("rate-1",
 				api.RateItem{
-					Resource: map[string]string{"model": "*"},
+					Resource: map[string]string{},
 					Costs:    map[string]int64{"input_tokens": 1},
 				},
 				api.RateItem{
@@ -386,62 +387,83 @@ func TestMatchRateItem_ExactMatch(t *testing.T) {
 		t.Fatal("exact item must match a resource with extra keys")
 	}
 	if _, ok := MatchRateItem(items, map[string]string{"model": "claude"}); ok {
-		t.Fatal("item must not match a resource missing a non-wildcard key")
+		t.Fatal("item must not match a resource missing an item key")
 	}
 	if _, ok := MatchRateItem(items, map[string]string{"model": "granite", "provider": "anthropic"}); ok {
 		t.Fatal("item must not match a different value")
 	}
 }
 
-func TestMatchRateItem_Wildcard(t *testing.T) {
-	items := []api.RateItem{
-		{Resource: map[string]string{"model": "*", "provider": "anthropic"}},
-		{Resource: map[string]string{"model": "granite"}},
+// A "*" value has no matching semantics: item values compare literally, so a
+// stored wildcard (rejected by rate validation, compared literally here as
+// defense in depth) matches only a resource literally carrying "*".
+func TestMatchRateItem_WildcardValueIsLiteral(t *testing.T) {
+	items := []api.RateItem{{Resource: map[string]string{"model": "*", "provider": "anthropic"}}}
+	if _, ok := MatchRateItem(items, map[string]string{"model": "claude", "provider": "anthropic"}); ok {
+		t.Fatal("literal comparison: a \"*\" value must not match a concrete model")
 	}
-	if _, ok := MatchRateItem(items, map[string]string{"model": "claude", "provider": "anthropic"}); !ok {
-		t.Fatal("wildcard item must match")
-	}
-	// A non-wildcard key must be present in the resource, even when the
-	// item's other keys are wildcards.
-	if _, ok := MatchRateItem(items, map[string]string{"model": "claude"}); ok {
-		t.Fatal("item must not match when a non-wildcard key is missing from the resource")
-	}
-
-	// A wildcard value skips the existence check entirely: an item keying
-	// only on a wildcard matches even resources that lack the key.
-	onlyWildcard := []api.RateItem{{Resource: map[string]string{"model": "*"}}}
-	if _, ok := MatchRateItem(onlyWildcard, map[string]string{"provider": "anthropic"}); !ok {
-		t.Fatal("wildcard-only item must match a resource lacking the key")
+	if _, ok := MatchRateItem(items, map[string]string{"model": "*", "provider": "anthropic"}); !ok {
+		t.Fatal("a resource literally carrying \"*\" matches the literal item")
 	}
 }
 
-func TestMatchRateItem_FewestWildcardsWins(t *testing.T) {
+// Among matching items, the one with the most keys — the tightest constraint
+// set — prices the event, regardless of list order. This is the fix for the
+// wildcard-count tie-break, which could not distinguish a one-key item from a
+// two-key item and let list order decide.
+func TestMatchRateItem_MostKeysWins(t *testing.T) {
 	items := []api.RateItem{
-		{Resource: map[string]string{"model": "*", "provider": "*"}},          // 2 wildcards
-		{Resource: map[string]string{"model": "*", "provider": "anthropic"}}, // 1 wildcard
-		{Resource: map[string]string{"model": "claude", "provider": "*"}},    // 1 wildcard
+		{Resource: map[string]string{"model": "claude"}},                              // vague, listed first
+		{Resource: map[string]string{"model": "claude", "provider": "anthropic"}},    // specific, listed second
+		{Resource: map[string]string{}},                                               // catch-all
 	}
 	item, ok := MatchRateItem(items, map[string]string{"model": "claude", "provider": "anthropic"})
 	if !ok {
 		t.Fatal("expected a match")
 	}
-	// Two items tie at 1 wildcard; the first in the list wins.
-	if item.Resource["provider"] != "anthropic" {
-		t.Fatalf("expected the first 1-wildcard item, got %+v", item.Resource)
+	if len(item.Resource) != 2 {
+		t.Fatalf("expected the two-key item to win over the vague one-key item, got %+v", item.Resource)
+	}
+
+	// Equal key counts keep the first item in the list.
+	tie := []api.RateItem{
+		{Resource: map[string]string{"model": "claude", "provider": "anthropic"}, Costs: map[string]int64{"input_tokens": 1}},
+		{Resource: map[string]string{"model": "claude", "region": "us-east"}, Costs: map[string]int64{"input_tokens": 2}},
+	}
+	item, ok = MatchRateItem(tie, map[string]string{"model": "claude", "provider": "anthropic", "region": "us-east"})
+	if !ok {
+		t.Fatal("expected a match")
+	}
+	if item.Costs["input_tokens"] != 1 {
+		t.Fatalf("expected the first equally-specific item to win, got %+v", item)
 	}
 }
 
-func TestMatchRateItem_EmptyResourceMatchesEverything(t *testing.T) {
+func TestMatchRateItem_EmptyResourceIsCatchAll(t *testing.T) {
 	items := []api.RateItem{
 		{Resource: map[string]string{"model": "granite"}},
-		{Resource: map[string]string{}}, // matches any resource, 0 wildcards
+		{Resource: map[string]string{}}, // matches any resource
 	}
 	item, ok := MatchRateItem(items, map[string]string{"model": "claude"})
 	if !ok {
 		t.Fatal("empty-resource item must match")
 	}
 	if len(item.Resource) != 0 {
-		t.Fatalf("expected the empty-resource item (most specific by wildcard count), got %+v", item.Resource)
+		t.Fatalf("expected the empty-resource item (the only match), got %+v", item.Resource)
+	}
+
+	// When a concrete item also matches, its tighter constraint set wins
+	// over the catch-all.
+	both := []api.RateItem{
+		{Resource: map[string]string{}},
+		{Resource: map[string]string{"model": "claude"}},
+	}
+	item, ok = MatchRateItem(both, map[string]string{"model": "claude"})
+	if !ok {
+		t.Fatal("expected a match")
+	}
+	if item.Resource["model"] != "claude" {
+		t.Fatalf("expected the one-key item to beat the catch-all, got %+v", item.Resource)
 	}
 }
 

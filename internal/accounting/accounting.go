@@ -128,30 +128,29 @@ func MatchSubjects(subjects []api.Subject, identity api.Identity) []api.Subject 
 }
 
 // MatchRateItem finds the best matching rate item for the given resource keys.
-// It returns the most specific match: an item matches if every key in its
-// resource map equals the corresponding event resource key, or is "*" (wildcard).
-// Among all matches, the one with the fewest wildcards wins.
+// An item matches when every key in its resource map equals the corresponding
+// event resource key — a subset constraint: keys absent from the item are
+// unconstrained, and an empty resource map matches every resource (the
+// catch-all). There are no wildcards: an unconstrained dimension is expressed
+// by leaving the key out, never with a "*" value (rate validation rejects
+// those). Among all matches, the item with the most keys — the tightest
+// constraint set — wins; ties keep the first item in the list.
 func MatchRateItem(items []api.RateItem, resource map[string]string) (api.RateItem, bool) {
 	bestIdx := -1
-	bestWildcards := int(^uint(0) >> 1) // max int
+	bestKeys := -1
 
 	for i, item := range items {
-		wildcards := 0
 		matched := true
-		for key, pattern := range item.Resource {
+		for key, value := range item.Resource {
 			val, exists := resource[key]
-			if pattern == "*" {
-				wildcards++
-				continue
-			}
-			if !exists || val != pattern {
+			if !exists || val != value {
 				matched = false
 				break
 			}
 		}
-		if matched && wildcards < bestWildcards {
+		if matched && len(item.Resource) > bestKeys {
 			bestIdx = i
-			bestWildcards = wildcards
+			bestKeys = len(item.Resource)
 		}
 	}
 
