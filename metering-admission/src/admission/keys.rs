@@ -1,9 +1,7 @@
-
 use sha2::{Digest, Sha256};
 
-use super::{Identity, Resource};
 use super::utils::escape;
-
+use super::{Identity, Resource};
 
 /// resource_hash mirrors Go's admission.ResourceHash: sort the resource keys
 /// byte-wise (Go's slices.Sorted over map keys), join `escape(key)=escape(value)`
@@ -60,8 +58,7 @@ pub fn build_admission_keys(tenant_id: &str, identity: &Identity, resource: &Res
 
     AdmissionKeys {
         tenant: format!("ai-metering:{tenant_id}:admit:tenant:{tenant_id}:{hash}"),
-        user: non_empty(&identity.user)
-            .map(|user| format!("ai-metering:{tenant_id}:admit:user:{user}:{hash}")),
+        user: non_empty(&identity.user).map(|user| format!("ai-metering:{tenant_id}:admit:user:{user}:{hash}")),
         groups: identity
             .groups
             .iter()

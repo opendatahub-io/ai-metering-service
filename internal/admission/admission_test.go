@@ -90,10 +90,10 @@ func TestBuildAdmissionKey_MatchesBuildAdmissionKeys(t *testing.T) {
 	keys := BuildAdmissionKeys("acme-corp", identity, resource)
 
 	pairs := map[string]string{
-		BuildAdmissionKey("acme-corp", api.Subject{Kind: "user", Name: "alice"}, resource): keys.User,
-		BuildAdmissionKey("acme-corp", api.Subject{Kind: "group", Name: "engineering"}, resource): keys.Groups[0],
+		BuildAdmissionKey("acme-corp", api.Subject{Kind: "user", Name: "alice"}, resource):            keys.User,
+		BuildAdmissionKey("acme-corp", api.Subject{Kind: "group", Name: "engineering"}, resource):     keys.Groups[0],
 		BuildAdmissionKey("acme-corp", api.Subject{Kind: "organization", Name: "research"}, resource): keys.Organization,
-		BuildAdmissionKey("acme-corp", api.Subject{Kind: "tenant", Name: "acme-corp"}, resource): keys.Tenant,
+		BuildAdmissionKey("acme-corp", api.Subject{Kind: "tenant", Name: "acme-corp"}, resource):      keys.Tenant,
 	}
 	for subjectKey, identityKey := range pairs {
 		if subjectKey != identityKey {

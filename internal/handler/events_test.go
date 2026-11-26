@@ -27,9 +27,9 @@ import (
 // redelivery.
 type fakeStore struct {
 	store.Store
-	policies        []api.BudgetPolicyResource
-	rates           map[string]api.RateResource
-	chargeInserted  []bool
+	policies          []api.BudgetPolicyResource
+	rates             map[string]api.RateResource
+	chargeInserted    []bool
 	insertChargeCalls int
 }
 

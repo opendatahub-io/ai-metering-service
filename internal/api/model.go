@@ -17,11 +17,35 @@ type Rate struct {
 type RateItem struct {
 	Resource map[string]string `json:"resource"`
 	Costs    map[string]int64  `json:"costs"`
+	// CatalogRateRef is provenance: the resource_rates_catalog row this item was
+	// copied from. Empty on hand-written items. Kept alongside the copied
+	// values so a later refresh can re-copy from the current catalog entry.
+	// Ignored by matching — it never affects pricing.
+	CatalogRateRef string `json:"catalog_rate_ref,omitempty"`
 }
 
 type RateResource struct {
 	Metadata Metadata `json:"metadata"`
 	Spec     Rate     `json:"spec"`
+}
+
+// CatalogRate is one catalog entry: pricing in integer BU per usage unit
+// for one resource identity. Its shape is deliberately a RateItem — a rate
+// item copied from the catalog is a verbatim copy of resource and costs.
+// The resource map carries any dimensions (model, provider, modality,
+// region, ...), but every dimension present becomes a required match key
+// in the copied item (subset matching): an entry must only carry the
+// dimensions the events actually carry, or its copies never match. Catalog
+// entries are templates rates are copied from — never referenced by the
+// accounting path.
+type CatalogRate struct {
+	Resource map[string]string `json:"resource"`
+	Costs    map[string]int64  `json:"costs"`
+}
+
+type ResourceCatalogRate struct {
+	Metadata Metadata    `json:"metadata"`
+	Spec     CatalogRate `json:"spec"`
 }
 
 type Budget struct {

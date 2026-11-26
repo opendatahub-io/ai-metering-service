@@ -1,4 +1,10 @@
-.PHONY: test test-rust test-e2e rust-build rust-release run
+.PHONY: fmt test test-rust test-e2e rust-build rust-release run
+
+# Format Go and Rust sources in place. gofmt is a no-op on clean files, so
+# `make fmt` is safe to run repeatedly; rustfmt via cargo fmt likewise.
+fmt:
+	gofmt -w .
+	cargo fmt --manifest-path metering-admission/Cargo.toml
 
 # Unit tests
 test:

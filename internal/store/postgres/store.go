@@ -109,6 +109,95 @@ func (s *PGStore) DeleteRate(ctx context.Context, tenantID, id string) error {
 	return err
 }
 
+// Catalog rates — the global resource_rates_catalog table. Read-only from the service's point
+// of view: rows are assumed to exist (seeded by an external process), and
+// tenants' rate items copy from them. The resource map is stored as JSONB
+// and filters address its well-known dimensions (provider, model) through
+// the ->> operator — the map itself is open-ended, mirroring RateItem.
+
+// CreateCatalogRate inserts one catalog entry. A duplicate resource (the
+// md5 uniqueness index on the canonical jsonb text) fails with a unique
+// constraint violation — the caller maps that to its API error.
+func (s *PGStore) CreateCatalogRate(ctx context.Context, rate *api.CatalogRate) (*api.ResourceCatalogRate, error) {
+	resource, err := json.Marshal(rate.Resource)
+	if err != nil {
+		return nil, err
+	}
+	costs, err := json.Marshal(rate.Costs)
+	if err != nil {
+		return nil, err
+	}
+	res := &api.ResourceCatalogRate{Spec: *rate}
+	err = s.db.QueryRowContext(ctx,
+		`INSERT INTO resource_rates_catalog (resource, costs)
+		 VALUES ($1, $2)
+		 RETURNING id, created_at, updated_at`,
+		resource, costs,
+	).Scan(&res.Metadata.ID, &res.Metadata.CreatedAt, &res.Metadata.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+func (s *PGStore) ListCatalogRates(ctx context.Context, pg store.Pagination, provider, modelPrefix string) (*api.Listing[api.ResourceCatalogRate], error) {
+	limit, offset := pgDefaults(pg)
+
+	where := ` WHERE ($1 = '' OR resource->>'provider' = $1) AND ($2 = '' OR resource->>'model' ILIKE $2 || '%')`
+	var total int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM resource_rates_catalog`+where, provider, modelPrefix).Scan(&total); err != nil {
+		return nil, err
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, resource, costs, created_at, updated_at
+		 FROM resource_rates_catalog`+where+` ORDER BY resource->>'model', resource LIMIT $3 OFFSET $4`,
+		provider, modelPrefix, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []api.ResourceCatalogRate
+	for rows.Next() {
+		b, err := scanResourceRate(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, *b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return &api.Listing[api.ResourceCatalogRate]{
+		Limit: int64(limit), Offset: int64(offset), Total: total, Items: items,
+	}, nil
+}
+
+func (s *PGStore) GetCatalogRate(ctx context.Context, id string) (*api.ResourceCatalogRate, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, resource, costs, created_at, updated_at
+		 FROM resource_rates_catalog WHERE id = $1`, id)
+	return scanResourceRate(row)
+}
+
+func scanResourceRate(row interface{ Scan(dest ...any) error }) (*api.ResourceCatalogRate, error) {
+	var b api.ResourceCatalogRate
+	var resource, costs []byte
+	if err := row.Scan(&b.Metadata.ID, &resource, &costs,
+		&b.Metadata.CreatedAt, &b.Metadata.UpdatedAt); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(resource, &b.Spec.Resource); err != nil {
+		return nil, fmt.Errorf("unmarshal resource rate resource: %w", err)
+	}
+	if err := json.Unmarshal(costs, &b.Spec.Costs); err != nil {
+		return nil, fmt.Errorf("unmarshal resource rate costs: %w", err)
+	}
+	return &b, nil
+}
+
 // Budgets
 
 func (s *PGStore) ListBudgets(ctx context.Context, tenantID string, pg store.Pagination) (*api.Listing[api.BudgetResource], error) {

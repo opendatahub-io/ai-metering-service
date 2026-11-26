@@ -61,7 +61,6 @@ impl AdmissionClient {
         Ok(Self::new_with_store(Box::new(RedisKVStore::new(url).await?)))
     }
 
-
     /// check_admission reads the admission flags for one (identity, resource)
     /// pair with a single bulk get and folds them most-restrictive — the
     /// read-time precedence across a user's group, organization and tenant

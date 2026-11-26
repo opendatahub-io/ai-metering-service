@@ -20,6 +20,15 @@ type Store interface {
 	UpdateRate(ctx context.Context, tenantID, id string, rate *api.Rate) (*api.RateResource, error)
 	DeleteRate(ctx context.Context, tenantID, id string) error
 
+	// Catalog rates — the global pricing catalog. Not part of the
+	// accounting path: catalog entries are templates rate items are copied
+	// from. CreateCatalogRate inserts one entry; a duplicate resource
+	// violates the uniqueness index and surfaces as a constraint error the
+	// caller decides how to present.
+	CreateCatalogRate(ctx context.Context, rate *api.CatalogRate) (*api.ResourceCatalogRate, error)
+	ListCatalogRates(ctx context.Context, pg Pagination, provider, modelPrefix string) (*api.Listing[api.ResourceCatalogRate], error)
+	GetCatalogRate(ctx context.Context, id string) (*api.ResourceCatalogRate, error)
+
 	ListBudgets(ctx context.Context, tenantID string, pg Pagination) (*api.Listing[api.BudgetResource], error)
 	GetBudget(ctx context.Context, tenantID, id string) (*api.BudgetResource, error)
 	// ListAllBudgets lists budgets across all tenants. It exists for the

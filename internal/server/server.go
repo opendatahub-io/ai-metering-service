@@ -28,6 +28,10 @@ func New(cfg *config.Config, s store.Store, kv store.KeyStore, renewer *renewal.
 	v1.PUT("/rates/:id", rates.Update)
 	v1.DELETE("/rates/:id", rates.Delete)
 
+	resourceRates := handler.NewCatalogRatesHandler(s)
+	v1.GET("/catalog-rates", resourceRates.List)
+	v1.GET("/catalog-rates/:id", resourceRates.Get)
+
 	budgets := handler.NewBudgetsHandler(s, kv)
 	v1.GET("/budgets", budgets.List)
 	v1.GET("/budgets/:id", budgets.Get)

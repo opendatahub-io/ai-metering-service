@@ -20,9 +20,7 @@ use metering_admission::{AdmissionClient, AdmissionResult, Identity, Resource};
 
 fn next_value(args: &[String], i: &mut usize, flag: &str) -> Result<String, String> {
     *i += 1;
-    args.get(*i)
-        .cloned()
-        .ok_or_else(|| format!("missing value for {flag}"))
+    args.get(*i).cloned().ok_or_else(|| format!("missing value for {flag}"))
 }
 
 #[tokio::main]
@@ -52,7 +50,7 @@ async fn main() -> Result<(), String> {
                     .split_once('=')
                     .ok_or_else(|| format!("--resource expects k=v, got {pair}"))?;
                 resource.insert(key.to_string(), value.to_string());
-            }
+            },
             other => return Err(format!("unknown argument {other}")),
         }
         i += 1;
@@ -72,10 +70,7 @@ async fn main() -> Result<(), String> {
         organization,
         tenant,
     };
-    let resource: Resource<'_> = resource
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
+    let resource: Resource<'_> = resource.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
 
     let client = AdmissionClient::new(url).await.map_err(|e| e.to_string())?;
     let result = client

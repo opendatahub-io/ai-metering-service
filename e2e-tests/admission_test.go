@@ -338,7 +338,7 @@ func TestAdmission_MultiBudgetFold(t *testing.T) {
 	// on the same model. Both exhaust; the shared (tenant, resource) flag
 	// must fold to the hard budget's deny, not the soft budget's over.
 	at := newAdmissionTest(t, "admission-fold",
-		budgetSpec{limit: 100},                                          // hard
+		budgetSpec{limit: 100}, // hard
 		budgetSpec{limit: 100, overage: map[string]any{"type": "soft"}}, // soft
 	)
 
@@ -358,7 +358,7 @@ func TestAdmission_FoldPartialExhaustion(t *testing.T) {
 	// Hard budget healthy, soft budget exhausted: the fold is over.
 	// Once the hard budget also exhausts: the fold is deny.
 	at := newAdmissionTest(t, "admission-fold-partial",
-		budgetSpec{limit: 10000},                                         // hard
+		budgetSpec{limit: 10000}, // hard
 		budgetSpec{limit: 100, overage: map[string]any{"type": "soft"}}, // soft
 	)
 

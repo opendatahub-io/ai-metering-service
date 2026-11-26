@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/opendatahub-io/ai-metering-service/internal/store"
+	"github.com/redis/go-redis/v9"
 )
 
 type RedisStore struct {

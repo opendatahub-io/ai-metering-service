@@ -534,4 +534,3 @@ func TestTenantIsolation(t *testing.T) {
 		t.Fatalf("expected 404 for different tenant, got %d", resp.StatusCode)
 	}
 }
-

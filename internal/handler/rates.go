@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 
@@ -42,6 +43,10 @@ func (h *RatesHandler) Create(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, api.NewError(api.ErrBadRequest, err.Error()))
 		return
 	}
+	if err := h.resolveCatalogRateRefs(c.Request.Context(), rate.Items); err != nil {
+		c.JSON(http.StatusBadRequest, err)
+		return
+	}
 	if err := validateRate(&rate); err != nil {
 		c.JSON(http.StatusBadRequest, err)
 		return
@@ -58,6 +63,10 @@ func (h *RatesHandler) Update(c *gin.Context) {
 	var rate api.Rate
 	if err := c.ShouldBindJSON(&rate); err != nil {
 		c.JSON(http.StatusBadRequest, api.NewError(api.ErrBadRequest, err.Error()))
+		return
+	}
+	if err := h.resolveCatalogRateRefs(c.Request.Context(), rate.Items); err != nil {
+		c.JSON(http.StatusBadRequest, err)
 		return
 	}
 	if err := validateRate(&rate); err != nil {
@@ -93,6 +102,30 @@ func validateRate(rate *api.Rate) *api.Error {
 					fmt.Sprintf("wildcard values are not supported: resource key %q must name a concrete value; leave the key out to leave that dimension unconstrained, or use an empty resource map as the catch-all", key))
 			}
 		}
+	}
+	return nil
+}
+
+// resolveCatalogRateRefs fills items that point at a catalog row: the
+// item's resource and costs (integer BU) are copied verbatim from the
+// resource_rates_catalog entry — a catalog entry is shaped exactly like a
+// RateItem — and the ref is kept as provenance. The copy is a snapshot —
+// later catalog changes do not reprice existing rates. Hand-written items
+// (no catalog_rate_ref) pass through untouched; a ref that does not
+// resolve is a client error.
+func (h *RatesHandler) resolveCatalogRateRefs(ctx context.Context, items []api.RateItem) *api.Error {
+	for i := range items {
+		ref := items[i].CatalogRateRef
+		if ref == "" {
+			continue
+		}
+		entry, err := h.store.GetCatalogRate(ctx, ref)
+		if err != nil {
+			return api.NewError(api.ErrBadRequest,
+				fmt.Sprintf("catalog_rate_ref %q does not resolve to an existing resource rate", ref))
+		}
+		items[i].Resource = entry.Spec.Resource
+		items[i].Costs = entry.Spec.Costs
 	}
 	return nil
 }

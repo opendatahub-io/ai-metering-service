@@ -1,14 +1,13 @@
-
-mod utils;
+mod client;
 mod keys;
 mod redis;
-mod client;
+mod utils;
 
 pub use client::{AdmissionClient, AdmissionResult};
 pub use redis::RedisKVStore;
 
-use std::collections::HashMap;
 use async_trait::async_trait;
+use std::collections::HashMap;
 
 pub struct Identity {
     pub user: String,

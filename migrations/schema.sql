@@ -58,6 +58,28 @@ CREATE INDEX idx_budget_policies_tenant ON budget_policies (tenant_id);
 -- and supports the containment operator these queries use exclusively.
 CREATE INDEX idx_budget_policies_subjects ON budget_policies USING GIN (subjects jsonb_path_ops);
 
+-- Catalog of resource rates, seeded from an external pricing source (the
+-- LiteLLM pricing file). Global, not tenant-scoped: a catalog entry is a
+-- template a tenant's rate items are copied from, with the entry id kept
+-- in the item (RateItem.catalog_rate_ref) as provenance so the copy can
+-- be refreshed later. Costs are integer BU, converted from USD once at
+-- seed time — every copy and refresh gets bit-identical values.
+-- The resource map carries any dimensions (model, provider, modality,
+-- region, ...) with no schema commitment, mirroring RateItem exactly;
+-- the same model can carry different rates for different modalities as
+-- distinct entries. Uniqueness is on the canonical jsonb text (jsonb
+-- normalizes key order, so text equality is jsonb equality) via md5, which
+-- works on every Postgres version — Postgres 18+ also allows a plain
+-- UNIQUE on the jsonb column itself.
+CREATE TABLE resource_rates_catalog (
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    resource   JSONB NOT NULL,
+    costs      JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX idx_resource_rates_catalog_resource ON resource_rates_catalog (md5(resource::text));
+
 -- Event-level facts, one row per CloudEvent.
 CREATE TABLE usage (
     id          BIGSERIAL PRIMARY KEY,

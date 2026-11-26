@@ -50,7 +50,7 @@ func rate(id string, items ...api.RateItem) *api.RateResource {
 
 func usageEvent(user string, groups []string, org, model string, usage map[string]int64) *api.CloudEvent {
 	return &api.CloudEvent{
-		ID:   "evt-test",
+		ID: "evt-test",
 		Data: api.CloudEventData{
 			Identity: api.Identity{
 				User:         user,
@@ -413,9 +413,9 @@ func TestMatchRateItem_WildcardValueIsLiteral(t *testing.T) {
 // two-key item and let list order decide.
 func TestMatchRateItem_MostKeysWins(t *testing.T) {
 	items := []api.RateItem{
-		{Resource: map[string]string{"model": "claude"}},                              // vague, listed first
-		{Resource: map[string]string{"model": "claude", "provider": "anthropic"}},    // specific, listed second
-		{Resource: map[string]string{}},                                               // catch-all
+		{Resource: map[string]string{"model": "claude"}},                          // vague, listed first
+		{Resource: map[string]string{"model": "claude", "provider": "anthropic"}}, // specific, listed second
+		{Resource: map[string]string{}},                                           // catch-all
 	}
 	item, ok := MatchRateItem(items, map[string]string{"model": "claude", "provider": "anthropic"})
 	if !ok {
