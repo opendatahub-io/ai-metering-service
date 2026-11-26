@@ -1,0 +1,9 @@
+# Pins the toolchain for every Rust invocation under this repo, not just the
+# crate: rustup resolves the channel by working directory, so without this
+# root pin, `make rust-build` (cwd = repo root, --manifest-path into the
+# crate) and `cd metering-admission && cargo build` would use different
+# toolchains and write mismatched-ABI artifacts into the same target dir.
+# Keep in sync with metering-admission/rust-toolchain.toml.
+[toolchain]
+channel = "1.96.0"
+components = ["clippy", "rust-analyzer"]
