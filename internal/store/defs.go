@@ -45,7 +45,11 @@ type Store interface {
 	UpdateBudgetPolicy(ctx context.Context, tenantID, id string, policy *api.BudgetPolicy) (*api.BudgetPolicyResource, error)
 	DeleteBudgetPolicy(ctx context.Context, tenantID, id string) error
 
-	FindPoliciesForIdentity(ctx context.Context, tenantID string, identity api.Identity) ([]api.BudgetPolicyResource, error)
+	// FindPoliciesWithRates resolves every policy matching the identity,
+	// joined with its rate's items — one round trip instead of a policy
+	// query plus a rate query per policy. A policy whose rate no longer
+	// resolves errors, mirroring the old per-policy GetRate failure.
+	FindPoliciesWithRates(ctx context.Context, tenantID string, identity api.Identity) ([]api.PolicyWithRates, error)
 	FindPoliciesForBudget(ctx context.Context, tenantID, budgetID string) ([]api.BudgetPolicyResource, error)
 
 	// Renewal — period-boundary refills of budget balances.
@@ -60,13 +64,17 @@ type Store interface {
 	// balances from.
 	SumBudgetCharges(ctx context.Context, tenantID, budgetID string, from, to time.Time) (int64, error)
 
-	// InsertUsage persists the event-level usage row and returns its id,
-	// inserting or returning the id of an already-present event.
-	InsertUsage(ctx context.Context, record *api.UsageRecord) (int64, error)
-	// InsertUsageCharge persists one budget's charge for a usage event.
-	// It returns false when the charge already exists (duplicate delivery),
-	// in which case the caller must skip the charge's balance and flag updates.
-	InsertUsageCharge(ctx context.Context, usageID int64, charge *api.UsageCharge) (bool, error)
+	// SettleUsage persists the usage event and its per-budget charges in
+	// one round trip: the event row is upserted (a redelivery reuses the
+	// existing row's id), and each charge is inserted with ON CONFLICT DO
+	// NOTHING against the (usage_id, budget_ref) idempotency marker. It
+	// returns the budget refs whose charges were newly inserted — the
+	// caller decrements balances and recomputes flags for exactly those,
+	// skipping duplicates from redelivery or overlapping policies. Charges
+	// sharing a budget within one call settle atomically, in argument
+	// order: the first charge for a budget wins, same as the per-charge
+	// loop it replaces.
+	SettleUsage(ctx context.Context, record *api.UsageRecord, charges []api.UsageCharge) ([]string, error)
 	QueryUsage(ctx context.Context, tenantID string, query *api.UsageQuery) (*api.UsageResult, error)
 	DeleteAllUsage(ctx context.Context, tenantID string) (int64, error)
 }

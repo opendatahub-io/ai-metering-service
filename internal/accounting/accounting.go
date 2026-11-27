@@ -28,24 +28,21 @@ type Applicable struct {
 // ResolveApplicable returns every policy that governs the (identity,
 // resource) pair, with its matching rate item and admission keys. Policies
 // whose rate does not cover the resource contribute nothing and are
-// skipped.
+// skipped. Resolution is one round trip: policies arrive joined with their
+// rate's items.
 func ResolveApplicable(ctx context.Context, s store.Store, tenantID string, identity api.Identity, resource map[string]string) ([]Applicable, error) {
-	policies, err := s.FindPoliciesForIdentity(ctx, tenantID, identity)
+	resolved, err := s.FindPoliciesWithRates(ctx, tenantID, identity)
 	if err != nil {
 		return nil, fmt.Errorf("find policies: %w", err)
 	}
-	if len(policies) == 0 {
+	if len(resolved) == 0 {
 		return nil, nil
 	}
 
 	var applicable []Applicable
-	for _, policy := range policies {
-		rate, err := s.GetRate(ctx, tenantID, policy.Spec.RateRef)
-		if err != nil {
-			return nil, fmt.Errorf("get rate %s: %w", policy.Spec.RateRef, err)
-		}
-
-		item, ok := MatchRateItem(rate.Spec.Items, resource)
+	for _, entry := range resolved {
+		policy := entry.Policy
+		item, ok := MatchRateItem(entry.Items, resource)
 		if !ok {
 			continue
 		}

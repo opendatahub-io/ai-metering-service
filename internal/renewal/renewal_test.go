@@ -173,8 +173,18 @@ type fakeRenewalStore struct {
 	sumBudgetCharges func(from, to time.Time) int64
 }
 
-func (f *fakeRenewalStore) FindPoliciesForIdentity(_ context.Context, _ string, _ api.Identity) ([]api.BudgetPolicyResource, error) {
-	return f.policies, nil
+func (f *fakeRenewalStore) FindPoliciesWithRates(_ context.Context, _ string, _ api.Identity) ([]api.PolicyWithRates, error) {
+	// Join the policies with their rates, the way the single-query
+	// resolution does; a missing rate errors like the real LEFT JOIN path.
+	var resolved []api.PolicyWithRates
+	for _, policy := range f.policies {
+		rate, ok := f.rates[policy.Spec.RateRef]
+		if !ok {
+			return nil, fmt.Errorf("get rate %s: rate does not resolve", policy.Spec.RateRef)
+		}
+		resolved = append(resolved, api.PolicyWithRates{Policy: policy, Items: rate.Spec.Items})
+	}
+	return resolved, nil
 }
 
 func (f *fakeRenewalStore) FindPoliciesForBudget(_ context.Context, _, _ string) ([]api.BudgetPolicyResource, error) {

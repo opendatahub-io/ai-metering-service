@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -27,32 +26,34 @@ import (
 // redelivery.
 type fakeStore struct {
 	store.Store
-	policies          []api.BudgetPolicyResource
-	rates             map[string]api.RateResource
+	policies          []api.PolicyWithRates
 	chargeInserted    []bool
 	insertChargeCalls int
 }
 
-func (s *fakeStore) FindPoliciesForIdentity(ctx context.Context, tenantID string, identity api.Identity) ([]api.BudgetPolicyResource, error) {
+func (s *fakeStore) FindPoliciesWithRates(ctx context.Context, tenantID string, identity api.Identity) ([]api.PolicyWithRates, error) {
 	return s.policies, nil
 }
 
-func (s *fakeStore) GetRate(ctx context.Context, tenantID, id string) (*api.RateResource, error) {
-	rate, ok := s.rates[id]
-	if !ok {
-		return nil, fmt.Errorf("rate %q not found", id)
+// SettleUsage mirrors the real CTE's semantics for the tests: each charge
+// consumes one chargeInserted flag, in order; the settled refs — those the
+// marker accepted — are returned for the handler to decrement.
+func (s *fakeStore) SettleUsage(ctx context.Context, record *api.UsageRecord, charges []api.UsageCharge) ([]string, error) {
+	var settled []string
+	for _, charge := range charges {
+		inserted := s.chargeInserted[s.insertChargeCalls]
+		s.insertChargeCalls++
+		if inserted {
+			settled = append(settled, charge.BudgetRef)
+		}
 	}
-	return &rate, nil
+	return settled, nil
 }
 
-func (s *fakeStore) InsertUsage(ctx context.Context, record *api.UsageRecord) (int64, error) {
-	return 1, nil
-}
-
-func (s *fakeStore) InsertUsageCharge(ctx context.Context, usageID int64, charge *api.UsageCharge) (bool, error) {
-	inserted := s.chargeInserted[s.insertChargeCalls]
-	s.insertChargeCalls++
-	return inserted, nil
+// paired joins a policy with its rate's items, the way
+// FindPoliciesWithRates delivers them in one query.
+func paired(policy api.BudgetPolicyResource, items []api.RateItem) api.PolicyWithRates {
+	return api.PolicyWithRates{Policy: policy, Items: items}
 }
 
 // fakeKV tracks the one balance counter the overlapping-policy scenario
@@ -136,23 +137,19 @@ func TestIngestOverlappingPoliciesShareBudget(t *testing.T) {
 	groupKey := admission.BuildAdmissionKey("acme-corp", api.Subject{Kind: api.SubjectKindGroup, Name: "team"}, resource)
 
 	fs := &fakeStore{
-		policies: []api.BudgetPolicyResource{
-			{Spec: api.BudgetPolicy{
+		policies: []api.PolicyWithRates{
+			paired(api.BudgetPolicyResource{Spec: api.BudgetPolicy{
 				BudgetRef: "shared-budget",
 				RateRef:   "r-user",
 				Subjects:  []api.Subject{{Kind: api.SubjectKindUser, Name: "alice"}},
 				// no overage: hard enforcement
-			}},
-			{Spec: api.BudgetPolicy{
+			}}, []api.RateItem{{Resource: resource, Costs: map[string]int64{"input_tokens": 2}}}),
+			paired(api.BudgetPolicyResource{Spec: api.BudgetPolicy{
 				BudgetRef: "shared-budget",
 				RateRef:   "r-group",
 				Subjects:  []api.Subject{{Kind: api.SubjectKindGroup, Name: "team"}},
 				Overage:   &api.OverageConfig{Type: "soft"},
-			}},
-		},
-		rates: map[string]api.RateResource{
-			"r-user":  {Spec: api.Rate{Name: "r-user", Items: []api.RateItem{{Resource: resource, Costs: map[string]int64{"input_tokens": 2}}}}},
-			"r-group": {Spec: api.Rate{Name: "r-group", Items: []api.RateItem{{Resource: resource, Costs: map[string]int64{"input_tokens": 3}}}}},
+			}}, []api.RateItem{{Resource: resource, Costs: map[string]int64{"input_tokens": 3}}}),
 		},
 		// The user policy's charge inserts and decrements; the group
 		// policy's charge collides on the shared budget's marker.
@@ -186,15 +183,12 @@ func TestIngestOverlappingPoliciesShareBudget(t *testing.T) {
 func TestIngestRedeliveryWritesNoFlags(t *testing.T) {
 	resource := map[string]string{"model": "m1"}
 	fs := &fakeStore{
-		policies: []api.BudgetPolicyResource{
-			{Spec: api.BudgetPolicy{
+		policies: []api.PolicyWithRates{
+			paired(api.BudgetPolicyResource{Spec: api.BudgetPolicy{
 				BudgetRef: "shared-budget",
 				RateRef:   "r-user",
 				Subjects:  []api.Subject{{Kind: api.SubjectKindUser, Name: "alice"}},
-			}},
-		},
-		rates: map[string]api.RateResource{
-			"r-user": {Spec: api.Rate{Name: "r-user", Items: []api.RateItem{{Resource: resource, Costs: map[string]int64{"input_tokens": 2}}}}},
+			}}, []api.RateItem{{Resource: resource, Costs: map[string]int64{"input_tokens": 2}}}),
 		},
 		chargeInserted: []bool{false},
 	}
@@ -218,21 +212,17 @@ func TestIngestRedeliveryWritesNoFlags(t *testing.T) {
 func overlappingFixture(userCost, groupCost int64) (*fakeStore, *fakeKV) {
 	resource := map[string]string{"model": "m1"}
 	fs := &fakeStore{
-		policies: []api.BudgetPolicyResource{
-			{Spec: api.BudgetPolicy{
+		policies: []api.PolicyWithRates{
+			paired(api.BudgetPolicyResource{Spec: api.BudgetPolicy{
 				BudgetRef: "shared-budget",
 				RateRef:   "r-user",
 				Subjects:  []api.Subject{{Kind: api.SubjectKindUser, Name: "alice"}},
-			}},
-			{Spec: api.BudgetPolicy{
+			}}, []api.RateItem{{Resource: resource, Costs: map[string]int64{"input_tokens": userCost}}}),
+			paired(api.BudgetPolicyResource{Spec: api.BudgetPolicy{
 				BudgetRef: "shared-budget",
 				RateRef:   "r-group",
 				Subjects:  []api.Subject{{Kind: api.SubjectKindGroup, Name: "team"}},
-			}},
-		},
-		rates: map[string]api.RateResource{
-			"r-user":  {Spec: api.Rate{Name: "r-user", Items: []api.RateItem{{Resource: resource, Costs: map[string]int64{"input_tokens": userCost}}}}},
-			"r-group": {Spec: api.Rate{Name: "r-group", Items: []api.RateItem{{Resource: resource, Costs: map[string]int64{"input_tokens": groupCost}}}}},
+			}}, []api.RateItem{{Resource: resource, Costs: map[string]int64{"input_tokens": groupCost}}}),
 		},
 		chargeInserted: []bool{true, false},
 	}

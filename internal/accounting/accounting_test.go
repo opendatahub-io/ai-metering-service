@@ -18,16 +18,18 @@ type fakeStore struct {
 	rates    map[string]*api.RateResource
 }
 
-func (f *fakeStore) FindPoliciesForIdentity(ctx context.Context, tenantID string, identity api.Identity) ([]api.BudgetPolicyResource, error) {
-	return f.policies, nil
-}
-
-func (f *fakeStore) GetRate(ctx context.Context, tenantID, id string) (*api.RateResource, error) {
-	rate, ok := f.rates[id]
-	if !ok {
-		return nil, fmt.Errorf("rate %s not found", id)
+func (f *fakeStore) FindPoliciesWithRates(ctx context.Context, tenantID string, identity api.Identity) ([]api.PolicyWithRates, error) {
+	// Join the policies with their rates, the way the single-query
+	// resolution does; a missing rate errors like the real LEFT JOIN path.
+	var resolved []api.PolicyWithRates
+	for _, policy := range f.policies {
+		rate, ok := f.rates[policy.Spec.RateRef]
+		if !ok {
+			return nil, fmt.Errorf("get rate %s: rate does not resolve", policy.Spec.RateRef)
+		}
+		resolved = append(resolved, api.PolicyWithRates{Policy: policy, Items: rate.Spec.Items})
 	}
-	return rate, nil
+	return resolved, nil
 }
 
 func policy(id, budgetRef, rateRef string, subjects ...api.Subject) api.BudgetPolicyResource {

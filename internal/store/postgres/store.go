@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lib/pq"
+
 	"github.com/opendatahub-io/ai-metering-service/internal/api"
 	"github.com/opendatahub-io/ai-metering-service/internal/period"
 	"github.com/opendatahub-io/ai-metering-service/internal/store"
@@ -489,7 +491,12 @@ func (s *PGStore) DeleteBudgetPolicy(ctx context.Context, tenantID, id string) e
 
 // Policy resolution
 
-func (s *PGStore) FindPoliciesForIdentity(ctx context.Context, tenantID string, identity api.Identity) ([]api.BudgetPolicyResource, error) {
+// FindPoliciesWithRates resolves every policy matching the identity in one
+// round trip, joining each policy's rate items so per-event accounting pays
+// no per-policy GetRate query. The LEFT JOIN keeps a policy whose rate was
+// deleted visible (NULL items) — surfaced as an error below, mirroring the
+// old per-policy GetRate failure instead of silently dropping the policy.
+func (s *PGStore) FindPoliciesWithRates(ctx context.Context, tenantID string, identity api.Identity) ([]api.PolicyWithRates, error) {
 	// Build JSONB containment conditions for each identity dimension.
 	// subjects @> '[{"kind":"user","name":"alice"}]'::jsonb
 	conditions := []string{}
@@ -498,25 +505,25 @@ func (s *PGStore) FindPoliciesForIdentity(ctx context.Context, tenantID string, 
 
 	if identity.User != "" {
 		subj, _ := json.Marshal([]api.Subject{{Kind: "user", Name: identity.User}})
-		conditions = append(conditions, fmt.Sprintf("subjects @> $%d::jsonb", argN))
+		conditions = append(conditions, fmt.Sprintf("p.subjects @> $%d::jsonb", argN))
 		args = append(args, string(subj))
 		argN++
 	}
 	for _, g := range identity.Groups {
 		subj, _ := json.Marshal([]api.Subject{{Kind: "group", Name: g}})
-		conditions = append(conditions, fmt.Sprintf("subjects @> $%d::jsonb", argN))
+		conditions = append(conditions, fmt.Sprintf("p.subjects @> $%d::jsonb", argN))
 		args = append(args, string(subj))
 		argN++
 	}
 	if identity.Organization != "" {
 		subj, _ := json.Marshal([]api.Subject{{Kind: "organization", Name: identity.Organization}})
-		conditions = append(conditions, fmt.Sprintf("subjects @> $%d::jsonb", argN))
+		conditions = append(conditions, fmt.Sprintf("p.subjects @> $%d::jsonb", argN))
 		args = append(args, string(subj))
 		argN++
 	}
 	if identity.Tenant != "" {
 		subj, _ := json.Marshal([]api.Subject{{Kind: "tenant", Name: identity.Tenant}})
-		conditions = append(conditions, fmt.Sprintf("subjects @> $%d::jsonb", argN))
+		conditions = append(conditions, fmt.Sprintf("p.subjects @> $%d::jsonb", argN))
 		args = append(args, string(subj))
 		argN++
 	}
@@ -532,11 +539,18 @@ func (s *PGStore) FindPoliciesForIdentity(ctx context.Context, tenantID string, 
 	// change which rate applies. created_at, id makes the winner a
 	// function of the configuration alone: the oldest policy for a budget
 	// prices its events, and only a configuration change can change that.
-	q := `SELECT id, tenant_id, budget_ref, rate_ref, subjects, overage,
-	             deduct_overage, created_at, updated_at
-	      FROM budget_policies
-	      WHERE tenant_id = $1 AND (` + strings.Join(conditions, " OR ") + `)
-	      ORDER BY created_at, id`
+	//
+	// rate_ref holds the rate's UUID (GetRate resolves WHERE id = $2, and
+	// policy validation only lets resolvable refs be stored), so the join
+	// matches on r.id — compared as text so a malformed ref degrades to a
+	// NULL join ("rate does not resolve") rather than a cast error that
+	// would break every policy in the tenant.
+	q := `SELECT p.id, p.tenant_id, p.budget_ref, p.rate_ref, p.subjects, p.overage,
+	             p.deduct_overage, p.created_at, p.updated_at, r.items
+	      FROM budget_policies p
+	      LEFT JOIN rates r ON r.tenant_id = p.tenant_id AND r.id::text = p.rate_ref
+	      WHERE p.tenant_id = $1 AND (` + strings.Join(conditions, " OR ") + `)
+	      ORDER BY p.created_at, p.id`
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -544,15 +558,35 @@ func (s *PGStore) FindPoliciesForIdentity(ctx context.Context, tenantID string, 
 	}
 	defer rows.Close()
 
-	var policies []api.BudgetPolicyResource
+	var resolved []api.PolicyWithRates
 	for rows.Next() {
-		p, err := scanBudgetPolicyResource(rows)
-		if err != nil {
+		var p api.BudgetPolicyResource
+		var subjectsJSON, overageJSON, itemsJSON []byte
+		if err := rows.Scan(&p.Metadata.ID, &p.Metadata.TenantID,
+			&p.Spec.BudgetRef, &p.Spec.RateRef,
+			&subjectsJSON, &overageJSON, &p.Spec.DeductOverage,
+			&p.Metadata.CreatedAt, &p.Metadata.UpdatedAt, &itemsJSON); err != nil {
 			return nil, err
 		}
-		policies = append(policies, *p)
+		if err := json.Unmarshal(subjectsJSON, &p.Spec.Subjects); err != nil {
+			return nil, err
+		}
+		if len(overageJSON) > 0 {
+			p.Spec.Overage = &api.OverageConfig{}
+			if err := json.Unmarshal(overageJSON, p.Spec.Overage); err != nil {
+				return nil, err
+			}
+		}
+		if itemsJSON == nil {
+			return nil, fmt.Errorf("get rate %s: rate does not resolve", p.Spec.RateRef)
+		}
+		var items []api.RateItem
+		if err := json.Unmarshal(itemsJSON, &items); err != nil {
+			return nil, fmt.Errorf("unmarshal rate %s items: %w", p.Spec.RateRef, err)
+		}
+		resolved = append(resolved, api.PolicyWithRates{Policy: p, Items: items})
 	}
-	return policies, rows.Err()
+	return resolved, rows.Err()
 }
 
 func (s *PGStore) FindPoliciesForBudget(ctx context.Context, tenantID, budgetID string) ([]api.BudgetPolicyResource, error) {
@@ -758,60 +792,66 @@ func (s *PGStore) ListChargeTargets(ctx context.Context, tenantID, budgetID stri
 
 // Usage
 
-// InsertUsage persists the event-level usage row and returns its id. For an
-// event already present (redelivery), it returns the existing row's id so
-// the caller can dedup each charge individually.
-func (s *PGStore) InsertUsage(ctx context.Context, record *api.UsageRecord) (int64, error) {
+// SettleUsage persists the usage event and its per-budget charges in one
+// round trip. The DO UPDATE on the usage conflict is the idiom that keeps
+// RETURNING yielding the id on redelivery (DO NOTHING returns no row); the
+// update writes the same value, so nothing changes but the id flows. The
+// charge insert settles in argument order — the first charge for a budget
+// wins, same as the per-charge loop it replaces — and conflicts within the
+// same statement (two policies sharing a budget) are handled by ON CONFLICT
+// DO NOTHING exactly like conflicts against previously settled rows.
+// RETURNING budget_ref reports exactly the newly-settled charges: the
+// caller decrements balances and recomputes flags for those alone.
+func (s *PGStore) SettleUsage(ctx context.Context, record *api.UsageRecord, charges []api.UsageCharge) ([]string, error) {
 	identity, err := json.Marshal(record.Identity)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	resource, err := json.Marshal(record.Resource)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	usage, err := json.Marshal(record.Usage)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 
-	var id int64
-	err = s.db.QueryRowContext(ctx,
-		`INSERT INTO usage (tenant_id, event_id, request_id, "timestamp", identity, resource, usage)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)
-		 ON CONFLICT (tenant_id, event_id) DO NOTHING
-		 RETURNING id`,
+	refs := make([]string, len(charges))
+	costs := make([]int64, len(charges))
+	for i, charge := range charges {
+		refs[i] = charge.BudgetRef
+		costs[i] = charge.BUCost
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`WITH u AS (
+		    INSERT INTO usage (tenant_id, event_id, request_id, "timestamp", identity, resource, usage)
+		    VALUES ($1, $2, $3, $4, $5, $6, $7)
+		    ON CONFLICT (tenant_id, event_id)
+		    DO UPDATE SET event_id = EXCLUDED.event_id
+		    RETURNING id
+		)
+		INSERT INTO usage_charges (usage_id, budget_ref, bu_cost)
+		SELECT u.id, b.ref, b.cost
+		FROM u, unnest($8::text[], $9::bigint[]) AS b(ref, cost)
+		ON CONFLICT (usage_id, budget_ref) DO NOTHING
+		RETURNING budget_ref`,
 		record.TenantID, record.EventID, record.RequestID, record.Timestamp,
-		identity, resource, usage).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		// Event already present — return its id for per-charge dedup.
-		err = s.db.QueryRowContext(ctx,
-			`SELECT id FROM usage WHERE tenant_id = $1 AND event_id = $2`,
-			record.TenantID, record.EventID).Scan(&id)
-	}
+		identity, resource, usage, pq.Array(refs), pq.Array(costs))
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return id, nil
-}
+	defer rows.Close()
 
-// InsertUsageCharge persists one budget's charge for a usage event. It
-// returns false when the charge already exists, so a redelivered event
-// never decrements the same budget twice.
-func (s *PGStore) InsertUsageCharge(ctx context.Context, usageID int64, charge *api.UsageCharge) (bool, error) {
-	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO usage_charges (usage_id, budget_ref, bu_cost)
-		 VALUES ($1, $2, $3)
-		 ON CONFLICT (usage_id, budget_ref) DO NOTHING`,
-		usageID, charge.BudgetRef, charge.BUCost)
-	if err != nil {
-		return false, err
+	var settled []string
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return nil, err
+		}
+		settled = append(settled, ref)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	return n > 0, nil
+	return settled, rows.Err()
 }
 
 func (s *PGStore) QueryUsage(ctx context.Context, tenantID string, query *api.UsageQuery) (*api.UsageResult, error) {

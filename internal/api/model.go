@@ -29,6 +29,14 @@ type RateResource struct {
 	Spec     Rate     `json:"spec"`
 }
 
+// PolicyWithRates is one budget policy joined with its rate's items — the
+// single-round-trip result of policy resolution (budget_policies JOIN
+// rates), so per-event accounting does not pay a query per policy.
+type PolicyWithRates struct {
+	Policy BudgetPolicyResource
+	Items  []RateItem
+}
+
 // CatalogRate is one catalog entry: pricing in integer BU per usage unit
 // for one resource identity. Its shape is deliberately a RateItem — a rate
 // item copied from the catalog is a verbatim copy of resource and costs.

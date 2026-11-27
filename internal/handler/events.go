@@ -61,14 +61,14 @@ func (h *EventsHandler) Ingest(c *gin.Context) {
 		return
 	}
 
-	// Pass 1 — account: persist the event, its per-budget charges, and
-	// decrement balance counters. Balances may go negative — that is
-	// overage, not an error. Each charge's row is inserted immediately
-	// before its decrement, so a retried CloudEvent (duplicate) never
-	// charges twice. A rejected insert means either a redelivery or
-	// another policy resolving to the same budget — the ledger row and the
-	// balance must move once either way; the flag fold below still covers
-	// every matching policy's identity objects.
+	// Pass 1 — account: persist the event and its per-budget charges in
+	// one store round trip, then decrement balance counters. Balances may
+	// go negative — that is overage, not an error. SettleUsage returns the
+	// budgets whose charges were newly settled; duplicates — a redelivered
+	// event, or another policy resolving to the same budget — settle no
+	// ledger row and move no balance, exactly like the per-charge loop
+	// this replaces. The flag fold below still covers every matching
+	// policy's identity objects.
 	balances := make(map[string]int64)    // budget ref -> balance after all decrements
 	chargedCost := make(map[string]int64) // budget ref -> BUCost applied by the winning charge
 	if len(charges) > 0 {
@@ -85,51 +85,80 @@ func (h *EventsHandler) Ingest(c *gin.Context) {
 			Resource: event.Data.Resource,
 			Usage:    event.Data.Usage,
 		}
-		usageID, err := h.store.InsertUsage(c.Request.Context(), record)
+		usageCharges := make([]api.UsageCharge, len(charges))
+		for i, charge := range charges {
+			usageCharges[i] = api.UsageCharge{
+				BudgetRef: charge.Policy.Spec.BudgetRef,
+				BUCost:    charge.BUCost,
+			}
+		}
+
+		settled, err := h.store.SettleUsage(c.Request.Context(), record, usageCharges)
 		if err != nil {
-			log.Printf("insert usage for event %s: %v", event.ID, err)
+			log.Printf("settle usage for event %s: %v", event.ID, err)
 			c.JSON(http.StatusInternalServerError, api.NewError(api.ErrCannotPersistUsage, "failed to persist usage"))
 			return
 		}
+		settledRef := make(map[string]bool, len(settled))
+		for _, ref := range settled {
+			settledRef[ref] = true
+		}
 
-		for _, charge := range charges {
-			inserted, err := h.store.InsertUsageCharge(c.Request.Context(), usageID, &api.UsageCharge{
-				BudgetRef: charge.Policy.Spec.BudgetRef,
-				BUCost:    charge.BUCost,
-			})
-			if err != nil {
-				log.Printf("insert usage charge for event %s budget %s: %v", event.ID, charge.Policy.Spec.BudgetRef, err)
-				c.JSON(http.StatusInternalServerError, api.NewError(api.ErrCannotPersistUsage, "failed to persist usage"))
-				return
-			}
-			if !inserted {
-				// An overlapping policy is distinguishable from a redelivery
-				// here: its charge was resolved in this same pass, so the
-				// winning cost is known. Equal costs are benign — either
-				// rate prices the event identically. Differing costs mean
-				// two policies share this budget with different rates, and
-				// the earlier one priced the event: an ambiguous
-				// configuration the operator must resolve.
-				if cost, ok := chargedCost[charge.Policy.Spec.BudgetRef]; ok && cost != charge.BUCost {
-					log.Printf("WARNING: ambiguous pricing for event %s: budget %s charged %d BU by an earlier matching policy, but policy %s (rate %s) computes %d BU for the same usage — two policies share this budget with different rates; align their rate_refs",
-						event.ID, charge.Policy.Spec.BudgetRef, cost,
-						charge.Policy.Metadata.ID, charge.Policy.Spec.RateRef, charge.BUCost)
+		// The settling charge for each budget is the first in resolution
+		// order — SettleUsage settles charges in argument order, so the
+		// earliest policy for a budget prices the event (the deterministic
+		// oldest-policy rule FindPoliciesWithRates orders by).
+		winner := make(map[string]int, len(settled))
+		for i, charge := range charges {
+			ref := charge.Policy.Spec.BudgetRef
+			if settledRef[ref] {
+				if _, ok := chargedCost[ref]; !ok {
+					chargedCost[ref] = charge.BUCost
+					winner[ref] = i
 				}
-				log.Printf("event %s already charged budget %s (redelivery or overlapping policy), skipping ledger row and balance update", event.ID, charge.Policy.Spec.BudgetRef)
+			}
+		}
+		// A charge that did not settle its budget is either part of a
+		// redelivery (nothing settled) or an overlapping policy (a
+		// different charge won the budget). The two are distinguishable
+		// here: an overlapping policy's charge was resolved in this same
+		// pass, so the winning cost is known. Equal costs are benign —
+		// either rate prices the event identically. Differing costs mean
+		// two policies share this budget with different rates, and the
+		// earlier one priced the event: an ambiguous configuration the
+		// operator must resolve. A full redelivery settles nothing, so it
+		// warns about nothing.
+		for i, charge := range charges {
+			ref := charge.Policy.Spec.BudgetRef
+			if settledRef[ref] && winner[ref] == i {
+				continue // this charge settled the budget
+			}
+			if cost, ok := chargedCost[ref]; ok && cost != charge.BUCost {
+				log.Printf("WARNING: ambiguous pricing for event %s: budget %s charged %d BU by an earlier matching policy, but policy %s (rate %s) computes %d BU for the same usage — two policies share this budget with different rates; align their rate_refs",
+					event.ID, ref, cost,
+					charge.Policy.Metadata.ID, charge.Policy.Spec.RateRef, charge.BUCost)
+			}
+			log.Printf("event %s already charged budget %s (redelivery or overlapping policy), skipping ledger row and balance update", event.ID, ref)
+		}
+
+		decremented := make(map[string]bool)
+		for _, charge := range charges {
+			ref := charge.Policy.Spec.BudgetRef
+			if !settledRef[ref] || decremented[ref] {
 				continue
 			}
+			decremented[ref] = true
 
-			balanceKey := admission.BuildBalanceKey(tenantID, charge.Policy.Spec.BudgetRef)
-			remaining, err := h.kvStore.DecrKey(c.Request.Context(), tenantID, balanceKey, charge.BUCost)
+			balanceKey := admission.BuildBalanceKey(tenantID, ref)
+			remaining, err := h.kvStore.DecrKey(c.Request.Context(), tenantID, balanceKey, chargedCost[ref])
 			if err != nil {
-				log.Printf("decrement balance for event %s budget %s: %v", event.ID, charge.Policy.Spec.BudgetRef, err)
+				log.Printf("decrement balance for event %s budget %s: %v", event.ID, ref, err)
 				c.JSON(http.StatusInternalServerError, api.NewError(api.ErrCannotUpdateBalance, "failed to update balance"))
 				return
 			}
-			balances[charge.Policy.Spec.BudgetRef] = remaining
-			chargedCost[charge.Policy.Spec.BudgetRef] = charge.BUCost
+			balances[ref] = remaining
 			if remaining < 0 {
-				log.Printf("overage for event %s budget %s: %d", event.ID, charge.Policy.Spec.BudgetRef, remaining)
+				log.Printf("overage for event %s budget %s: %d", event.ID, ref, remaining)
 			}
 		}
 	}
