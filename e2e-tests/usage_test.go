@@ -388,4 +388,189 @@ func TestEvents_Ingest100(t *testing.T) {
 		}
 		t.Logf("alice: %d requests", requests)
 	})
+
+	// --- Query: grouped by budget — the per-charge view. Every event in
+	// this fixture charges the one budget, so the single group's requests
+	// and bu_cost must equal the event-level totals.
+	t.Run("by_budget_30d", func(t *testing.T) {
+		resp := doRequest(t, "GET", "/api/v1/usage?range=30d&group_by=budget", nil)
+		requireStatus(t, resp, http.StatusOK)
+		var result map[string]any
+		json.Unmarshal(readBody(t, resp), &result)
+
+		data := result["data"].([]any)
+		if len(data) != 1 {
+			t.Fatalf("expected 1 budget group, got %d", len(data))
+		}
+		row := data[0].(map[string]any)
+		dims := row["dimensions"].(map[string]any)
+		if dims["budget"] != budgetID {
+			t.Errorf("budget group = %v, want %s", dims["budget"], budgetID)
+		}
+		requests := int64(row["requests"].(float64))
+		cost := int64(row["bu_cost"].(float64))
+		if requests != expectedRequests {
+			t.Errorf("budget requests: expected %d, got %d", expectedRequests, requests)
+		}
+		if cost != expectedBUCost {
+			t.Errorf("budget bu_cost: expected %d, got %d", expectedBUCost, cost)
+		}
+		t.Logf("budget %s: %d requests, %d BU cost", budgetID, requests, cost)
+	})
+
+	// --- Query: filtered by budget — flat totals for that budget's charges.
+	t.Run("filter_budget_30d", func(t *testing.T) {
+		resp := doRequest(t, "GET", "/api/v1/usage?range=30d&budget="+budgetID, nil)
+		requireStatus(t, resp, http.StatusOK)
+		var result map[string]any
+		json.Unmarshal(readBody(t, resp), &result)
+
+		data := result["data"].([]any)
+		if len(data) != 1 {
+			t.Fatalf("expected 1 row, got %d", len(data))
+		}
+		row := data[0].(map[string]any)
+		requests := int64(row["requests"].(float64))
+		cost := int64(row["bu_cost"].(float64))
+		if requests != expectedRequests {
+			t.Errorf("budget-filtered requests: expected %d, got %d", expectedRequests, requests)
+		}
+		if cost != expectedBUCost {
+			t.Errorf("budget-filtered bu_cost: expected %d, got %d", expectedBUCost, cost)
+		}
+	})
+}
+
+// Events that resolve no charges — no policy matches the resource — stay
+// in the ledger (one row per CloudEvent) and surface in the usage queries:
+// the empty-budget group in group_by=budget is the unmetered-traffic view.
+// A group_by dimension the events do not carry groups under the empty
+// string instead of failing.
+func TestUsage_UnmeteredEvents(t *testing.T) {
+	cleanup()
+
+	// A rate covering exactly one model: events for any other model match
+	// the policy but no rate item, so they meter at nothing.
+	rate := map[string]any{
+		"name": "e2e-unmetered-rate",
+		"items": []map[string]any{
+			{
+				"resource": map[string]string{"model": "e2e-covered-model"},
+				"costs":    map[string]int64{"input_tokens": 2},
+			},
+		},
+	}
+	resp := doRequest(t, "POST", "/api/v1/rates", rate)
+	requireStatus(t, resp, http.StatusCreated)
+	var rateCreated map[string]any
+	json.Unmarshal(readBody(t, resp), &rateCreated)
+	rateID := rateCreated["metadata"].(map[string]any)["id"].(string)
+
+	budget := map[string]any{
+		"name":            "e2e-unmetered-budget",
+		"limit":           1000000,
+		"period_start":    "2026-11-01T00:00:00Z",
+		"period_duration": "P1M",
+		"renewal_type":    "drain",
+	}
+	resp = doRequest(t, "POST", "/api/v1/budgets", budget)
+	requireStatus(t, resp, http.StatusCreated)
+	var budgetCreated map[string]any
+	json.Unmarshal(readBody(t, resp), &budgetCreated)
+	budgetID := budgetCreated["metadata"].(map[string]any)["id"].(string)
+
+	policy := map[string]any{
+		"budget_ref": budgetID,
+		"rate_ref":   rateID,
+		"subjects":   []map[string]string{{"kind": "tenant", "name": tenant}},
+	}
+	resp = doRequest(t, "POST", "/api/v1/budget_policies", policy)
+	requireStatus(t, resp, http.StatusCreated)
+
+	ingest := func(id, model string, tokens int64) {
+		event := map[string]any{
+			"specversion": "1.0",
+			"id":          id,
+			"source":      "praxis/praxis-pod-e2e-0",
+			"type":        "io.opendatahub.aigateway.usage.v1",
+			"time":        time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339),
+			"data": map[string]any{
+				"request_id": id,
+				"identity":   map[string]any{"user": "alice", "tenant": tenant},
+				"resource":   map[string]string{"model": model},
+				"usage":      map[string]int64{"input_tokens": tokens},
+			},
+		}
+		resp := doRequest(t, "POST", "/api/v1/events", event)
+		requireStatus(t, resp, http.StatusNoContent)
+		resp.Body.Close()
+	}
+	ingest("evt-unmetered-1", "e2e-covered-model", 50)   // charged: 50 * 2 = 100 BU
+	ingest("evt-unmetered-2", "e2e-covered-model", 50)   // charged: 100 BU
+	ingest("evt-unmetered-3", "e2e-uncovered-model", 50) // no rate item: unmetered
+
+	// --- group_by=budget: the budget's group plus the empty unmetered group
+	resp = doRequest(t, "GET", "/api/v1/usage?range=30d&group_by=budget", nil)
+	requireStatus(t, resp, http.StatusOK)
+	var result map[string]any
+	json.Unmarshal(readBody(t, resp), &result)
+	data := result["data"].([]any)
+	if len(data) != 2 {
+		t.Fatalf("expected 2 budget groups (budget + unmetered), got %d: %v", len(data), data)
+	}
+	groups := map[string]map[string]any{}
+	for _, item := range data {
+		row := item.(map[string]any)
+		groups[row["dimensions"].(map[string]any)["budget"].(string)] = row
+	}
+	budgetRow, ok := groups[budgetID]
+	if !ok {
+		t.Fatalf("budget group %s missing: %v", budgetID, groups)
+	}
+	if got := int64(budgetRow["requests"].(float64)); got != 2 {
+		t.Errorf("budget requests = %d, want 2", got)
+	}
+	if got := int64(budgetRow["bu_cost"].(float64)); got != 200 {
+		t.Errorf("budget bu_cost = %d, want 200", got)
+	}
+	unmetered, ok := groups[""]
+	if !ok {
+		t.Fatalf("unmetered (empty budget) group missing: %v", groups)
+	}
+	if got := int64(unmetered["requests"].(float64)); got != 1 {
+		t.Errorf("unmetered requests = %d, want 1", got)
+	}
+	if got := int64(unmetered["bu_cost"].(float64)); got != 0 {
+		t.Errorf("unmetered bu_cost = %d, want 0", got)
+	}
+
+	// --- group_by=model: the uncovered model is visible, metered at zero
+	resp = doRequest(t, "GET", "/api/v1/usage?range=30d&group_by=model", nil)
+	requireStatus(t, resp, http.StatusOK)
+	json.Unmarshal(readBody(t, resp), &result)
+	models := map[string]int64{}
+	for _, item := range result["data"].([]any) {
+		row := item.(map[string]any)
+		models[row["dimensions"].(map[string]any)["model"].(string)] = int64(row["bu_cost"].(float64))
+	}
+	if models["e2e-covered-model"] != 200 || models["e2e-uncovered-model"] != 0 {
+		t.Errorf("model costs = %v, want covered=200 uncovered=0", models)
+	}
+
+	// --- group_by on a dimension no event carries: one empty group, no error
+	resp = doRequest(t, "GET", "/api/v1/usage?range=30d&group_by=region", nil)
+	requireStatus(t, resp, http.StatusOK)
+	json.Unmarshal(readBody(t, resp), &result)
+	data = result["data"].([]any)
+	if len(data) != 1 {
+		t.Fatalf("expected 1 region group, got %d", len(data))
+	}
+	if dims := data[0].(map[string]any)["dimensions"].(map[string]any); dims["region"] != "" {
+		t.Errorf("missing dimension should group under empty string, got %v", dims)
+	}
+
+	// --- a dimension that cannot be embedded in SQL is rejected
+	resp = doRequest(t, "GET", "/api/v1/usage?range=30d&group_by=model'--", nil)
+	requireStatus(t, resp, http.StatusBadRequest)
+	resp.Body.Close()
 }

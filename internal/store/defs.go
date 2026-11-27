@@ -22,10 +22,12 @@ type Store interface {
 
 	// Catalog rates — the global pricing catalog. Not part of the
 	// accounting path: catalog entries are templates rate items are copied
-	// from. CreateCatalogRate inserts one entry; a duplicate resource
-	// violates the uniqueness index and surfaces as a constraint error the
-	// caller decides how to present.
-	CreateCatalogRate(ctx context.Context, rate *api.CatalogRate) (*api.ResourceCatalogRate, error)
+	// from. ApplyCatalogRate inserts one entry, or updates the costs of
+	// the entry whose resource already exists — a changed pricing file
+	// must reprice the catalog (existing rate copies are snapshots and are
+	// never touched). Returns nil, nil when the entry exists with
+	// unchanged costs: nothing was written.
+	ApplyCatalogRate(ctx context.Context, rate *api.CatalogRate) (*api.ResourceCatalogRate, error)
 	ListCatalogRates(ctx context.Context, pg Pagination, provider, modelPrefix string) (*api.Listing[api.ResourceCatalogRate], error)
 	GetCatalogRate(ctx context.Context, id string) (*api.ResourceCatalogRate, error)
 

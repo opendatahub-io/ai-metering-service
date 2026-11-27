@@ -466,8 +466,9 @@ func TestAdmission_GroupSubject(t *testing.T) {
 	}, 200)
 	at.expectBalance(t, 0, -500) // unchanged
 	at.expectFlagAbsent(t, "group", "data-science")
-	// Only alice's member event is in the ledger; bob's did not add a row.
-	expectUsageCount(t, "admission-group", 1)
+	// Both events are in the ledger — one row per CloudEvent — but only
+	// alice's charged: bob's row is unmetered (0 BU, no budget group).
+	expectUsageCount(t, "admission-group", 2)
 }
 
 func TestAdmission_OrganizationSubject(t *testing.T) {
@@ -508,8 +509,10 @@ func TestAdmission_MultiSubjectPolicy(t *testing.T) {
 }
 
 func TestAdmission_NoMatchingPolicy(t *testing.T) {
-	// The policy subjects carol; alice's event matches nothing and must
-	// leave no trace: no usage row, no flags, no balance change.
+	// The policy subjects carol; alice's event matches nothing. It is
+	// still persisted — the ledger is one row per CloudEvent — but meters
+	// at nothing: no charges, no flags, no balance change. It surfaces in
+	// the empty-budget group: the unmetered-traffic view.
 	at := newAdmissionTestForSubjects(t, "admission-nomatch",
 		[]map[string]string{{"kind": "user", "name": "carol"}},
 		budgetSpec{limit: 100},
@@ -518,12 +521,13 @@ func TestAdmission_NoMatchingPolicy(t *testing.T) {
 	at.ingest(t, "evt-nm-001", 100)
 	at.expectBalance(t, 0, 100) // untouched
 	at.expectFlagAbsent(t, "user", "alice")
-	expectUsageCount(t, "admission-nomatch", 0)
+	expectUsageCount(t, "admission-nomatch", 1)
 }
 
 func TestAdmission_RateItemMismatch(t *testing.T) {
 	// The policy matches the identity, but its rate has no item for the
-	// event's model: no charge, no flags, no ledger row.
+	// event's model: no charge, no flags — but the event is persisted
+	// (one row per CloudEvent), meters at 0, and surfaces as unmetered.
 	at := newAdmissionTest(t, "admission-ratemismatch", budgetSpec{limit: 100})
 
 	otherResource := map[string]string{"model": "admission-ratemismatch-other", "provider": "test"}
@@ -531,5 +535,5 @@ func TestAdmission_RateItemMismatch(t *testing.T) {
 
 	at.expectBalance(t, 0, 100) // untouched
 	at.expectFlagAbsent(t, "tenant", tenant)
-	expectUsageCount(t, "admission-ratemismatch", 0)
+	expectUsageCount(t, "admission-ratemismatch-other", 1)
 }

@@ -558,7 +558,22 @@ paths:
             type: string
           description: |
             Comma-separated dimensions to group by: `model`, `provider`,
-            `user`, `group`, `org`. Omit for flat totals.
+            `user`, `group`, `org`, `budget`. Omit for flat totals.
+
+            Any resource key the events carry can be grouped by (the
+            resource is stored as open-ended JSONB) — not just the listed
+            dimensions. Events missing the dimension group under the
+            empty string. Dimensions are restricted to word characters,
+            dashes and underscores.
+
+            `budget` groups by the budgets events were charged to (from
+            the per-charge ledger): each group shows the events charged to
+            that budget, with `bu_cost` being that budget's charges. An
+            event charging two budgets counts once in each group, so
+            budget groups overlap — unlike the per-event dimensions, which
+            partition. Events that resolved no charges (no policy matched,
+            or no rate item covered the resource) appear in an empty
+            `budget` group — the unmetered-traffic view.
         - name: granularity
           in: query
           required: false
@@ -597,6 +612,14 @@ paths:
           schema:
             type: string
           description: Filter by provider.
+        - name: budget
+          in: query
+          required: false
+          schema:
+            type: string
+          description: |
+            Filter by budget id: the result aggregates the events charged
+            to that budget, with bu_cost being the budget's charges.
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Offset"
       responses:
@@ -678,8 +701,9 @@ paths:
           schema:
             type: string
           description: |
-            Comma-separated dimensions; `model` and `provider` only — the
-            identity dimensions (`user`, `group`, `org`) are rejected.
+            Comma-separated dimensions; `model`, `provider`, and `budget`
+            only — the identity dimensions (`user`, `group`, `org`) are
+            rejected.
         - name: granularity
           in: query
           required: false

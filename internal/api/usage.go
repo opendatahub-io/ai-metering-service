@@ -26,6 +26,7 @@ type UsageQuery struct {
 	Org         string
 	Model       string
 	Provider    string
+	Budget      string
 	Limit       int
 	Offset      int
 }

@@ -1,7 +1,9 @@
 package handler
 
 import (
+	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -20,6 +22,10 @@ func NewUsageHandler(s store.Store) *UsageHandler {
 
 func (h *UsageHandler) Query(c *gin.Context) {
 	query := buildUsageQuery(c)
+	if err := validateGroupBy(query.GroupBy); err != nil {
+		c.JSON(http.StatusBadRequest, err)
+		return
+	}
 	result, err := h.store.QueryUsage(c.Request.Context(), getTenantID(c), query)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, api.NewError(api.ErrCannotQueryUsage, err.Error()))
@@ -40,6 +46,10 @@ func (h *UsageHandler) QueryMe(c *gin.Context) {
 			return
 		}
 	}
+	if err := validateGroupBy(query.GroupBy); err != nil {
+		c.JSON(http.StatusBadRequest, err)
+		return
+	}
 
 	result, err := h.store.QueryUsage(c.Request.Context(), getTenantID(c), query)
 	if err != nil {
@@ -56,6 +66,24 @@ func (h *UsageHandler) DeleteAll(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"deleted": deleted})
+}
+
+// groupByDimPattern bounds group_by dimensions to word characters, dashes
+// and underscores: the dimension is embedded in the store's SQL (both as a
+// string literal and as a quoted identifier), so anything else is a
+// rejection, not a query.
+var groupByDimPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// validateGroupBy rejects dimensions that cannot be safely embedded in the
+// store's SQL. Returns nil when every dimension is well-formed.
+func validateGroupBy(groupBy []string) *api.Error {
+	for _, dim := range groupBy {
+		if !groupByDimPattern.MatchString(dim) {
+			return api.NewError(api.ErrInvalidGroupBy,
+				fmt.Sprintf("invalid group_by dimension %q: dimensions must be word characters, dashes or underscores", dim))
+		}
+	}
+	return nil
 }
 
 func buildUsageQuery(c *gin.Context) *api.UsageQuery {
@@ -77,6 +105,7 @@ func buildUsageQuery(c *gin.Context) *api.UsageQuery {
 		Org:         c.Query("org"),
 		Model:       c.Query("model"),
 		Provider:    c.Query("provider"),
+		Budget:      c.Query("budget"),
 		Limit:       pg.Limit,
 		Offset:      pg.Offset,
 	}

@@ -117,10 +117,13 @@ func (s *PGStore) DeleteRate(ctx context.Context, tenantID, id string) error {
 // and filters address its well-known dimensions (provider, model) through
 // the ->> operator — the map itself is open-ended, mirroring RateItem.
 
-// CreateCatalogRate inserts one catalog entry. A duplicate resource (the
-// md5 uniqueness index on the canonical jsonb text) fails with a unique
-// constraint violation — the caller maps that to its API error.
-func (s *PGStore) CreateCatalogRate(ctx context.Context, rate *api.CatalogRate) (*api.ResourceCatalogRate, error) {
+// ApplyCatalogRate inserts one catalog entry, or updates the costs of the
+// entry whose resource already exists (the md5 uniqueness index on the
+// canonical jsonb text is the conflict target) — a changed pricing file
+// must reprice the catalog. The change-only WHERE keeps an unchanged file
+// from rewriting every row on restart; when the update is excluded no row
+// is returned, and the entry is reported as unchanged (nil, nil).
+func (s *PGStore) ApplyCatalogRate(ctx context.Context, rate *api.CatalogRate) (*api.ResourceCatalogRate, error) {
 	resource, err := json.Marshal(rate.Resource)
 	if err != nil {
 		return nil, err
@@ -133,9 +136,15 @@ func (s *PGStore) CreateCatalogRate(ctx context.Context, rate *api.CatalogRate) 
 	err = s.db.QueryRowContext(ctx,
 		`INSERT INTO resource_rates_catalog (resource, costs)
 		 VALUES ($1, $2)
+		 ON CONFLICT (md5(resource::text))
+		 DO UPDATE SET costs = EXCLUDED.costs, updated_at = now()
+		 WHERE resource_rates_catalog.costs IS DISTINCT FROM EXCLUDED.costs
 		 RETURNING id, created_at, updated_at`,
 		resource, costs,
 	).Scan(&res.Metadata.ID, &res.Metadata.CreatedAt, &res.Metadata.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil // entry exists with these costs: nothing was written
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -870,11 +879,25 @@ func (s *PGStore) QueryUsage(ctx context.Context, tenantID string, query *api.Us
 		bucketExpr = fmt.Sprintf(`date_trunc('%s', "timestamp")`, granularity)
 	}
 
-	// usage is 1:1 with the event; its budgets' charges live in
-	// usage_charges. The inner query produces one row per event with the
-	// event's total cost across budgets, so requests count events and usage
-	// maps are summed once per event; bu_cost stays additive in the outer
-	// aggregation.
+	// The budget dimension changes the join shape. Without it, the inner
+	// query is one row per event with the event's total cost across budgets
+	// (charges pre-aggregated per event), so requests count events and
+	// usage maps are summed once per event. With it — group_by containing
+	// budget, or a budget filter — rows become (event x charge): each
+	// budget group sees the events charged to it, bu_cost is that budget's
+	// charge, and requests counts events per budget (an event charging two
+	// budgets counts once in each, so budget groups overlap — unlike the
+	// per-event dimensions, which partition). The LEFT JOIN keeps events
+	// with no charges visible as an empty-budget group: the
+	// unmetered-traffic view.
+	budgetDim := false
+	for _, dim := range query.GroupBy {
+		if dim == "budget" {
+			budgetDim = true
+		}
+	}
+	byCharge := budgetDim || query.Budget != ""
+
 	var innerSelect []string
 	if bucketExpr != "" {
 		innerSelect = append(innerSelect, bucketExpr+" AS bucket")
@@ -882,10 +905,12 @@ func (s *PGStore) QueryUsage(ctx context.Context, tenantID string, query *api.Us
 	for _, dim := range query.GroupBy {
 		innerSelect = append(innerSelect, dimensionExpr(dim)+" AS \""+dim+"\"")
 	}
-	innerSelect = append(innerSelect,
-		"u.usage",
-		"COALESCE(c.cost, 0) AS bu_cost",
-	)
+	innerSelect = append(innerSelect, "u.usage")
+	if byCharge {
+		innerSelect = append(innerSelect, "COALESCE(c.bu_cost, 0) AS bu_cost")
+	} else {
+		innerSelect = append(innerSelect, "COALESCE(c.cost, 0) AS bu_cost")
+	}
 
 	var outerSelect []string
 	var outerGroup []string
@@ -933,12 +958,22 @@ func (s *PGStore) QueryUsage(ctx context.Context, tenantID string, query *api.Us
 		args = append(args, query.Provider)
 		argN++
 	}
+	if query.Budget != "" {
+		where = append(where, fmt.Sprintf("c.budget_ref = $%d", argN))
+		args = append(args, query.Budget)
+		argN++
+	}
+
+	fromClause := " FROM usage u" +
+		" LEFT JOIN (SELECT usage_id, sum(bu_cost) AS cost FROM usage_charges GROUP BY usage_id) c" +
+		" ON c.usage_id = u.id"
+	if byCharge {
+		fromClause = " FROM usage u LEFT JOIN usage_charges c ON c.usage_id = u.id"
+	}
 
 	q := "SELECT " + strings.Join(outerSelect, ", ") +
 		" FROM (SELECT " + strings.Join(innerSelect, ", ") +
-		" FROM usage u" +
-		" LEFT JOIN (SELECT usage_id, sum(bu_cost) AS cost FROM usage_charges GROUP BY usage_id) c" +
-		" ON c.usage_id = u.id" +
+		fromClause +
 		" WHERE " + strings.Join(where, " AND ") +
 		") per_event"
 	if len(outerGroup) > 0 {
@@ -1093,22 +1128,32 @@ func scanBudgetPolicyResource(s scanner) (*api.BudgetPolicyResource, error) {
 	return &p, nil
 }
 
+// dimensionExpr maps a group_by dimension to its SQL expression. Every
+// expression COALESCEs to the empty string: events that do not carry the
+// dimension group together under "" instead of failing the row scan on
+// SQL NULL — the same convention the budget dimension uses for unmetered
+// events. The dim is embedded in SQL, so callers must validate it (the
+// handler allows word characters, dashes and underscores only).
 func dimensionExpr(dim string) string {
 	switch dim {
 	case "user":
-		return "identity->>'user'"
+		return "COALESCE(identity->>'user', '')"
 	case "group":
-		return "identity->>'groups'"
+		return "COALESCE(identity->>'groups', '')"
 	case "org":
-		return "identity->>'organization'"
+		return "COALESCE(identity->>'organization', '')"
 	case "model":
-		return "resource->>'model'"
+		return "COALESCE(resource->>'model', '')"
 	case "provider":
-		return "resource->>'provider'"
+		return "COALESCE(resource->>'provider', '')"
 	case "region":
-		return "resource->>'region'"
+		return "COALESCE(resource->>'region', '')"
+	case "budget":
+		// Only valid when the charge join is active (group_by containing
+		// budget switches it on); empty marks events with no charges.
+		return "COALESCE(c.budget_ref, '')"
 	default:
-		return "resource->>'" + dim + "'"
+		return "COALESCE(resource->>'" + dim + "', '')"
 	}
 }
 

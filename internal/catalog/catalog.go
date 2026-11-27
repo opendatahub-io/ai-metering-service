@@ -46,12 +46,13 @@ func buCost(cost *float64, costToBu int32) int64 {
 	return int64(math.Ceil(*cost * float64(costToBu)))
 }
 
-// ImportCatalog decodes the pricing catalog and persists every
+// ImportCatalog decodes the pricing catalog and upserts every
 // "provider/model"-keyed entry as a CatalogRate with integer BU costs.
 // Entries with other key shapes (metadata, bare model names, or
-// multi-segment prefixes) are skipped, as are entries whose resource
-// already exists in the catalog (the unique index rejects them — the
-// import is additive, it never reprices existing entries).
+// multi-segment prefixes) are skipped. A changed pricing file reprices the
+// catalog: entries whose costs changed are updated, so future rate copies
+// pick up the new prices — existing rate copies are snapshots and are
+// never touched. An unchanged file writes nothing.
 func ImportCatalog(loader Loader, cfg *config.Config, store store.Store) error {
 	reader, err := loader.Load()
 	if err != nil {
@@ -63,6 +64,7 @@ func ImportCatalog(loader Loader, cfg *config.Config, store store.Store) error {
 		return fmt.Errorf("decode catalog: %w", err)
 	}
 
+	var written, unchanged int
 	for key, entry := range catalog {
 		split := strings.Split(key, "/")
 		if len(split) != 2 {
@@ -84,10 +86,17 @@ func ImportCatalog(loader Loader, cfg *config.Config, store store.Store) error {
 			},
 		}
 
-		if _, err := store.CreateCatalogRate(context.Background(), &rate); err != nil {
-			log.Printf("Failed to import catalog entry: %v: %v. Continuing ...", key, err)
+		res, err := store.ApplyCatalogRate(context.Background(), &rate)
+		if err != nil {
+			log.Printf("failed to import catalog entry %q: %v. Continuing ...", key, err)
 			continue
 		}
+		if res != nil {
+			written++
+		} else {
+			unchanged++
+		}
 	}
+	log.Printf("catalog import: %d entries written, %d unchanged", written, unchanged)
 	return nil
 }
