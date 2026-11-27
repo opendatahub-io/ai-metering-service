@@ -8,9 +8,9 @@ import (
 	"log"
 
 	_ "github.com/lib/pq"
+	"github.com/opendatahub-io/ai-metering-service/internal/balance"
 	"github.com/opendatahub-io/ai-metering-service/internal/catalog"
 	"github.com/opendatahub-io/ai-metering-service/internal/config"
-	"github.com/opendatahub-io/ai-metering-service/internal/renewal"
 	"github.com/opendatahub-io/ai-metering-service/internal/server"
 	"github.com/opendatahub-io/ai-metering-service/internal/store"
 	"github.com/opendatahub-io/ai-metering-service/internal/store/postgres"
@@ -35,7 +35,7 @@ func main() {
 	// The renewal sweep runs in every pod. The claim of a due budget is a
 	// row lock in Postgres, so multiple pods pick disjoint budgets and no
 	// leader election is needed.
-	renewer := renewal.New(store, redis, cfg.Renewal)
+	renewer := balance.New(store, redis, cfg.Renewal)
 	go func() {
 		if err := renewer.Run(context.Background()); err != nil {
 			log.Printf("renewal sweep stopped: %v", err)

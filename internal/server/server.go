@@ -2,9 +2,9 @@ package server
 
 import (
 	"github.com/gin-gonic/gin"
+	"github.com/opendatahub-io/ai-metering-service/internal/balance"
 	"github.com/opendatahub-io/ai-metering-service/internal/config"
 	"github.com/opendatahub-io/ai-metering-service/internal/handler"
-	"github.com/opendatahub-io/ai-metering-service/internal/renewal"
 	"github.com/opendatahub-io/ai-metering-service/internal/store"
 )
 
@@ -13,7 +13,7 @@ type Server struct {
 	cfg    *config.Config
 }
 
-func New(cfg *config.Config, s store.Store, kv store.KeyStore, renewer *renewal.Renewer) *Server {
+func New(cfg *config.Config, s store.Store, kv store.KeyStore, renewer *balance.Renewer) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 
@@ -35,6 +35,7 @@ func New(cfg *config.Config, s store.Store, kv store.KeyStore, renewer *renewal.
 	budgets := handler.NewBudgetsHandler(s, kv)
 	v1.GET("/budgets", budgets.List)
 	v1.GET("/budgets/:id", budgets.Get)
+	v1.GET("/budgets/:id/utilization", budgets.Utilization)
 	v1.POST("/budgets", budgets.Create)
 	v1.PUT("/budgets/:id", budgets.Update)
 	v1.DELETE("/budgets/:id", budgets.Delete)

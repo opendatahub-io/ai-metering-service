@@ -660,3 +660,177 @@ func TestUsage_UnmeteredEvents(t *testing.T) {
 	requireStatus(t, resp, http.StatusBadRequest)
 	resp.Body.Close()
 }
+
+// The utilization endpoint reports the current-period spend against the
+// opening balance — the ledger-derived mirror of the enforcement balance
+// — with the previous period's overage accounting and the burn-rate
+// projection.
+func TestBudgetUtilization(t *testing.T) {
+	cleanup()
+
+	rate := map[string]any{
+		"name":  "e2e-utilization-rate",
+		"items": []map[string]any{{"resource": map[string]string{}, "costs": map[string]int64{"input_tokens": 2}}},
+	}
+	resp := doRequest(t, "POST", "/api/v1/rates", rate)
+	requireStatus(t, resp, http.StatusCreated)
+	var rateCreated map[string]any
+	json.Unmarshal(readBody(t, resp), &rateCreated)
+	rateID := rateCreated["metadata"].(map[string]any)["id"].(string)
+
+	now := time.Now().UTC()
+	ingest := func(id string, at time.Time, tokens int64) {
+		event := map[string]any{
+			"specversion": "1.0",
+			"id":          id,
+			"source":      "praxis/praxis-pod-e2e-0",
+			"type":        "io.opendatahub.aigateway.usage.v1",
+			"time":        at.Format(time.RFC3339),
+			"data": map[string]any{
+				"request_id": id,
+				"identity":   map[string]any{"user": "alice", "tenant": tenant},
+				"resource":   map[string]string{"model": "e2e-utilization-model"},
+				"usage":      map[string]int64{"input_tokens": tokens},
+			},
+		}
+		resp := doRequest(t, "POST", "/api/v1/events", event)
+		requireStatus(t, resp, http.StatusNoContent)
+		resp.Body.Close()
+	}
+	budgetIDFor := func(t *testing.T, name string) string {
+		resp := doRequest(t, "GET", "/api/v1/budgets?limit=1000", nil)
+		requireStatus(t, resp, http.StatusOK)
+		var listing map[string]any
+		json.Unmarshal(readBody(t, resp), &listing)
+		for _, item := range listing["items"].([]any) {
+			b := item.(map[string]any)
+			if b["spec"].(map[string]any)["name"] == name {
+				return b["metadata"].(map[string]any)["id"].(string)
+			}
+		}
+		t.Fatalf("budget %q not found", name)
+		return ""
+	}
+	utilizationOf := func(t *testing.T, id string) map[string]any {
+		resp := doRequest(t, "GET", "/api/v1/budgets/"+id+"/utilization", nil)
+		requireStatus(t, resp, http.StatusOK)
+		var u map[string]any
+		json.Unmarshal(readBody(t, resp), &u)
+		return u
+	}
+	policyFor := func(t *testing.T, budgetName string, extra map[string]any) {
+		body := map[string]any{
+			"budget_ref": budgetIDFor(t, budgetName),
+			"rate_ref":   rateID,
+			"subjects":   []map[string]string{{"kind": "tenant", "name": tenant}},
+		}
+		for k, v := range extra {
+			body[k] = v
+		}
+		resp := doRequest(t, "POST", "/api/v1/budget_policies", body)
+		requireStatus(t, resp, http.StatusCreated)
+		resp.Body.Close()
+	}
+
+	// All three budgets and their policies exist BEFORE any event is
+	// ingested: charges flow through the policies present at ingest time,
+	// so a budget whose policy arrives after the events sees none of
+	// them. Healthy and over anchor 10 days ago (their first period);
+	// deduct anchors 70 days ago so a completed period exists.
+	for _, b := range []struct {
+		name   string
+		limit  int64
+		anchor time.Time
+	}{
+		{"e2e-utilization-healthy", 1000, now.AddDate(0, 0, -10)},
+		{"e2e-utilization-over", 100, now.AddDate(0, 0, -10)},
+		{"e2e-utilization-deduct", 1000, now.AddDate(0, 0, -70)},
+	} {
+		resp := doRequest(t, "POST", "/api/v1/budgets", map[string]any{
+			"name": b.name, "limit": b.limit,
+			"period_start":    b.anchor.Format(time.RFC3339),
+			"period_duration": "P1M", "renewal_type": "drain",
+		})
+		requireStatus(t, resp, http.StatusCreated)
+		resp.Body.Close()
+	}
+	policyFor(t, "e2e-utilization-healthy", nil)
+	policyFor(t, "e2e-utilization-over", nil)
+	policyFor(t, "e2e-utilization-deduct", map[string]any{"deduct_overage": true})
+
+	// All three budgets have tenant-wide policies, so both events charge
+	// all of them — the overlapping-budget semantics. The back-dated
+	// third event (20 days ago) lands before the healthy and over
+	// anchors, so it never touches those two.
+	ingest("evt-util-1", now.Add(-24*time.Hour), 200) // 400 BU
+	ingest("evt-util-2", now.Add(-24*time.Hour), 100) // 200 BU
+
+	// --- Healthy: limit 1000, spent 600 over a period that started 10
+	// days ago. First period: opening = limit; utilization 0.6; burn
+	// ~60 BU/day; a projection exists.
+	u := utilizationOf(t, budgetIDFor(t, "e2e-utilization-healthy"))
+	if got := int64(u["opening"].(float64)); got != 1000 {
+		t.Errorf("healthy opening = %d, want 1000", got)
+	}
+	if got := int64(u["spent"].(float64)); got != 600 {
+		t.Errorf("healthy spent = %d, want 600", got)
+	}
+	if got := int64(u["remaining"].(float64)); got != 400 {
+		t.Errorf("healthy remaining = %d, want 400", got)
+	}
+	if got := u["utilization"].(float64); got < 0.59 || got > 0.61 {
+		t.Errorf("healthy utilization = %v, want ~0.6", got)
+	}
+	if rate := u["burn_rate"]; rate == nil {
+		t.Error("healthy burn rate missing")
+	} else if r := rate.(float64); r < 59 || r > 61 {
+		t.Errorf("healthy burn rate = %v, want ~60", r)
+	}
+	if u["projected_exhaustion"] == nil {
+		t.Error("healthy projection missing")
+	}
+	if got := int64(u["prev_spent"].(float64)); got != 0 {
+		t.Errorf("first period prev_spent = %d, want 0", got)
+	}
+
+	// --- Over budget: limit 100, spent 600 → overage 500, utilization 6.
+	u = utilizationOf(t, budgetIDFor(t, "e2e-utilization-over"))
+	if got := int64(u["overage"].(float64)); got != 500 {
+		t.Errorf("over overage = %d, want 500", got)
+	}
+	if got := int64(u["remaining"].(float64)); got != -500 {
+		t.Errorf("over remaining = %d, want -500", got)
+	}
+	if got := u["utilization"].(float64); got < 5.9 || got > 6.1 {
+		t.Errorf("over utilization = %v, want ~6", got)
+	}
+	if u["projected_exhaustion"] != nil {
+		t.Error("over budget must not project exhaustion")
+	}
+
+	// --- Carried debt: the deduct budget's previous period overspends
+	// (2000 BU against a 1000 limit), and deduct_overage subtracts the
+	// 1000 overage from the current opening.
+	ingest("evt-util-3", now.AddDate(0, 0, -20), 1000) // 2000 BU, previous period
+	u = utilizationOf(t, budgetIDFor(t, "e2e-utilization-deduct"))
+	if got := int64(u["prev_spent"].(float64)); got != 2000 {
+		t.Errorf("deduct prev_spent = %d, want 2000", got)
+	}
+	if got := int64(u["prev_overage"].(float64)); got != 1000 {
+		t.Errorf("deduct prev_overage = %d, want 1000", got)
+	}
+	if got := int64(u["carried_debt"].(float64)); got != 1000 {
+		t.Errorf("deduct carried_debt = %d, want 1000", got)
+	}
+	if got := int64(u["opening"].(float64)); got != 0 {
+		t.Errorf("deduct opening = %d, want 0 (limit - debt)", got)
+	}
+	if u["utilization"] != nil {
+		t.Errorf("deduct utilization should be null for zero opening, got %v", u["utilization"])
+	}
+
+	// --- Unknown budget: 404.
+	resp = doRequest(t, "GET", "/api/v1/budgets/00000000-0000-0000-0000-000000000000/utilization", nil)
+	requireStatus(t, resp, http.StatusNotFound)
+	resp.Body.Close()
+}

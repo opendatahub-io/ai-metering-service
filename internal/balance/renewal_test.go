@@ -1,4 +1,4 @@
-package renewal
+package balance
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 
 	"github.com/opendatahub-io/ai-metering-service/internal/admission"
 	"github.com/opendatahub-io/ai-metering-service/internal/api"
+	"github.com/opendatahub-io/ai-metering-service/internal/period"
 	"github.com/opendatahub-io/ai-metering-service/internal/store"
 )
 
@@ -575,5 +576,121 @@ func TestRebuildBalance_FirstPeriodHasNoCarry(t *testing.T) {
 	}
 	if want := int64(300 - 50); balance != want {
 		t.Fatalf("expected balance %d (limit - current spend, no carry), got %d", want, balance)
+	}
+}
+
+// --- ComputeUtilization ---
+
+func TestComputeUtilization(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	window := period.Window{
+		CurrentStart: now.AddDate(0, 0, -10),
+		NextEnd:      now.AddDate(0, 0, 20),
+		PrevStart:    now.AddDate(0, 0, -40), // a completed period exists
+	}
+
+	cases := []struct {
+		name            string
+		budget          api.Budget
+		policies        []api.BudgetPolicyResource
+		prevSpent       int64
+		spent           int64
+		wantOpening     int64
+		wantRemaining   int64
+		wantOverage     int64
+		wantUtilization *float64
+		wantCarry       int64
+		wantCarriedDebt int64
+		wantPrevOverage int64
+		wantBurnRate    *float64
+		wantProjection  bool
+	}{
+		{
+			name: "healthy drain budget", budget: api.Budget{Limit: 1000, RenewalType: api.RenewalDrain},
+			prevSpent: 100, spent: 400,
+			wantOpening: 1000, wantRemaining: 600, wantUtilization: f64(0.4),
+			wantPrevOverage: 0, wantBurnRate: f64(40), wantProjection: true, // 400 BU / 10 days
+		},
+		{
+			name: "over budget", budget: api.Budget{Limit: 1000, RenewalType: api.RenewalDrain},
+			prevSpent: 0, spent: 1300,
+			wantOpening: 1000, wantRemaining: -300, wantOverage: 300, wantUtilization: f64(1.3),
+			wantBurnRate: f64(130), wantProjection: false, // already in overage
+		},
+		{
+			name: "deduct carries debt", budget: api.Budget{Limit: 1000, RenewalType: api.RenewalDrain},
+			policies:  []api.BudgetPolicyResource{{Spec: api.BudgetPolicy{DeductOverage: true}}},
+			prevSpent: 1500, spent: 200,
+			wantOpening: 500, wantRemaining: 300, wantUtilization: f64(0.4),
+			wantCarriedDebt: 500, wantPrevOverage: 500, wantBurnRate: f64(20), wantProjection: true,
+		},
+		{
+			name: "rollover carries unused capped", budget: api.Budget{Limit: 1000, RenewalType: api.RenewalRollover, MaxCarry: int64Ptr(100)},
+			prevSpent: 100, spent: 200,
+			wantOpening: 1100, wantRemaining: 900, wantUtilization: f64(200.0 / 1100.0),
+			wantCarry: 100, wantPrevOverage: 0, wantBurnRate: f64(20), wantProjection: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := api.BudgetResource{Metadata: api.Metadata{ID: "b1", TenantID: "acme-corp"}, Spec: tc.budget}
+			u := ComputeUtilization(res, tc.policies, window, tc.prevSpent, tc.spent, now)
+
+			if u.Opening != tc.wantOpening {
+				t.Errorf("opening = %d, want %d", u.Opening, tc.wantOpening)
+			}
+			if u.Remaining != tc.wantRemaining {
+				t.Errorf("remaining = %d, want %d", u.Remaining, tc.wantRemaining)
+			}
+			if u.Overage != tc.wantOverage {
+				t.Errorf("overage = %d, want %d", u.Overage, tc.wantOverage)
+			}
+			if tc.wantUtilization == nil || u.Utilization == nil {
+				if (tc.wantUtilization == nil) != (u.Utilization == nil) {
+					t.Errorf("utilization = %v, want %v", u.Utilization, tc.wantUtilization)
+				}
+			} else if *u.Utilization != *tc.wantUtilization {
+				t.Errorf("utilization = %v, want %v", *u.Utilization, *tc.wantUtilization)
+			}
+			if u.Carry != tc.wantCarry {
+				t.Errorf("carry = %d, want %d", u.Carry, tc.wantCarry)
+			}
+			if u.CarriedDebt != tc.wantCarriedDebt {
+				t.Errorf("carried debt = %d, want %d", u.CarriedDebt, tc.wantCarriedDebt)
+			}
+			if u.PrevOverage != tc.wantPrevOverage {
+				t.Errorf("prev overage = %d, want %d", u.PrevOverage, tc.wantPrevOverage)
+			}
+			if tc.wantBurnRate == nil || u.BurnRate == nil {
+				if (tc.wantBurnRate == nil) != (u.BurnRate == nil) {
+					t.Errorf("burn rate = %v, want %v", u.BurnRate, tc.wantBurnRate)
+				}
+			} else if *u.BurnRate != *tc.wantBurnRate {
+				t.Errorf("burn rate = %v, want %v", *u.BurnRate, *tc.wantBurnRate)
+			}
+			if (u.ProjectedExhaustion != nil) != tc.wantProjection {
+				t.Errorf("projected exhaustion present = %v, want %v", u.ProjectedExhaustion != nil, tc.wantProjection)
+			}
+		})
+	}
+}
+
+func f64(v float64) *float64 { return &v }
+
+func TestComputeUtilizationFirstPeriod(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	// First period: PrevStart == CurrentStart — the limit stands, no
+	// carry or debt, no burn rate before 24h elapsed.
+	window := period.Window{CurrentStart: now.Add(-2 * time.Hour), NextEnd: now.AddDate(0, 0, 30), PrevStart: now.Add(-2 * time.Hour)}
+	res := api.BudgetResource{Spec: api.Budget{Limit: 500, RenewalType: api.RenewalRollover}}
+
+	u := ComputeUtilization(res, nil, window, 0, 50, now)
+
+	if u.Opening != 500 || u.Remaining != 450 || u.Carry != 0 || u.CarriedDebt != 0 || u.PrevSpent != 0 {
+		t.Errorf("first period: %+v", u)
+	}
+	if u.BurnRate != nil || u.ProjectedExhaustion != nil {
+		t.Errorf("no burn rate or projection before 24h: %+v", u)
 	}
 }

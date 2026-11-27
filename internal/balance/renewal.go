@@ -27,7 +27,7 @@
 // indistinguishable to a reader — absent keys read as "no budget applies",
 // i.e. unlimited), periodically as a self-heal bounding ledger/counter
 // drift, and lazily when a flag recompute finds a balance key missing.
-package renewal
+package balance
 
 import (
 	"context"
@@ -347,38 +347,4 @@ func (r *Renewer) renew(ctx context.Context, rn *store.BudgetRenewal) error {
 	// this, a renewed budget keeps denying its identities until their next
 	// event, and a hard-denied identity produces no events at all.
 	return recomputeFlags(ctx, r.store, r.kv, tenantID, budget.Metadata.ID)
-}
-
-// NewBalance computes the balance a budget starts a period with:
-//
-//	drain:    limit
-//	rollover: limit + min(limit - prevSpent, max_carry) when unused
-//	deduct_overage (any policy referencing the budget): minus the previous
-//	          period's overspend
-//
-// deduct_overage is configured on the BudgetPolicy but the balance is per
-// budget; when several policies reference the same budget, the first one
-// enabling it applies. prevSpent is the closed period's ledger sum, so the
-// result is deterministic per period — a retried renewal writes the same
-// value.
-func NewBalance(budget api.Budget, policies []api.BudgetPolicyResource, prevSpent int64) int64 {
-	balance := budget.Limit
-	if budget.RenewalType == api.RenewalRollover {
-		if unused := budget.Limit - prevSpent; unused > 0 {
-			carry := unused
-			if budget.MaxCarry != nil && carry > *budget.MaxCarry {
-				carry = *budget.MaxCarry
-			}
-			balance = budget.Limit + carry
-		}
-	}
-	for _, p := range policies {
-		if p.Spec.DeductOverage {
-			if overage := prevSpent - budget.Limit; overage > 0 {
-				balance -= overage
-			}
-			break
-		}
-	}
-	return balance
 }

@@ -367,6 +367,38 @@ paths:
         "500":
           $ref: "#/components/responses/Internal"
 
+  /api/v1/budgets/{id}/utilization:
+    parameters:
+      - $ref: "#/components/parameters/Tenant"
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [Budgets]
+      summary: Get a budget's current-period utilization
+      description: |
+        Reports one budget's current-period spend against its opening
+        balance — the ledger-derived mirror of the enforcement balance.
+        The window is the budget's own current period (not a query range):
+        the same period the renewal loop and the admission flags operate
+        on. The opening balance is the limit plus rollover carry minus
+        carried debt, exactly what the renewal state machine grants;
+        remaining is opening minus spent, the same number admission
+        enforces. Includes the previous period's overage accounting and a
+        burn-rate projection to exhaustion.
+      operationId: getBudgetUtilization
+      responses:
+        "200":
+          description: The utilization snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BudgetUtilization"
+        "403":
+          $ref: "#/components/responses/MissingTenant"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/Internal"
+
   /api/v1/budget_policies:
     get:
       tags: [Budget Policies]
@@ -1183,6 +1215,77 @@ components:
         rate_ref:
           type: string
           description: Optional rate table applied while in overage.
+
+    BudgetUtilization:
+      type: object
+      properties:
+        budget_id:
+          type: string
+        budget_name:
+          type: string
+        limit:
+          type: integer
+          format: int64
+          description: The budget's configured BU capacity per period.
+        period:
+          type: object
+          properties:
+            start:
+              type: string
+              format: date-time
+            end:
+              type: string
+              format: date-time
+          description: The current period — [start, end), half-open; end is the next renewal boundary.
+        opening:
+          type: integer
+          format: int64
+          description: "What the current period started with: limit + carry - carried debt."
+        spent:
+          type: integer
+          format: int64
+          description: Current-period charges, from the ledger.
+        remaining:
+          type: integer
+          format: int64
+          description: opening - spent — the enforcement balance; negative is overage.
+        overage:
+          type: integer
+          format: int64
+          description: Spend past the opening balance this period.
+        utilization:
+          type: number
+          nullable: true
+          description: spent/opening; null when the opening is not positive.
+        prev_spent:
+          type: integer
+          format: int64
+          description: The completed period's charges; zero in the first period.
+        prev_overage:
+          type: integer
+          format: int64
+          description: The completed period's overspend past the limit.
+        carry:
+          type: integer
+          format: int64
+          description: Rollover carry granted into this period (capped by max_carry).
+        carried_debt:
+          type: integer
+          format: int64
+          description: Previous period's overage deducted from this period's opening (deduct_overage).
+        burn_rate:
+          type: number
+          nullable: true
+          description: Average BU/day since the period start; null before 24 hours elapsed.
+        projected_exhaustion:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            When the remaining balance hits zero at the current burn rate;
+            null when already in overage or no rate yet. May lie beyond
+            the period end — the budget renews first; compare with
+            period.end.
 
     BudgetPolicy:
       type: object

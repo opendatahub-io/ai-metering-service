@@ -29,6 +29,41 @@ type RateResource struct {
 	Spec     Rate     `json:"spec"`
 }
 
+// BudgetUtilization reports one budget's current-period spend against its
+// opening balance — the ledger-derived mirror of the enforcement balance,
+// with the previous period's overage accounting and a burn-rate projection.
+type BudgetUtilization struct {
+	BudgetID   string            `json:"budget_id"`
+	BudgetName string            `json:"budget_name"`
+	Limit      int64             `json:"limit"`
+	Period     UtilizationPeriod `json:"period"`
+	// Opening is what the current period started with: the limit, plus
+	// rollover carry, minus carried debt.
+	Opening   int64 `json:"opening"`
+	Spent     int64 `json:"spent"`
+	Remaining int64 `json:"remaining"` // opening - spent; the enforcement balance
+	Overage   int64 `json:"overage"`   // spend past the opening balance
+	// Utilization is spent/opening; null when the opening is not positive.
+	Utilization *float64 `json:"utilization"`
+	PrevSpent   int64    `json:"prev_spent"`
+	PrevOverage int64    `json:"prev_overage"`
+	Carry       int64    `json:"carry"`        // rollover carry granted into this period
+	CarriedDebt int64    `json:"carried_debt"` // previous overage deducted (deduct_overage)
+	// BurnRate is the average BU/day since the period start; null before
+	// 24 hours have elapsed (an extrapolation from less would be noise).
+	BurnRate *float64 `json:"burn_rate"`
+	// ProjectedExhaustion is when the remaining balance hits zero at the
+	// current burn rate; null when already in overage or no rate yet. May
+	// lie beyond the period end — the budget renews first; compare with
+	// period.end.
+	ProjectedExhaustion *time.Time `json:"projected_exhaustion"`
+}
+
+type UtilizationPeriod struct {
+	Start time.Time `json:"start"`
+	End   time.Time `json:"end"`
+}
+
 // PolicyWithRates is one budget policy joined with its rate's items — the
 // single-round-trip result of policy resolution (budget_policies JOIN
 // rates), so per-event accounting does not pay a query per policy.

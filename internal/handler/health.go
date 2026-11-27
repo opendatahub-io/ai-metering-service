@@ -4,14 +4,14 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/opendatahub-io/ai-metering-service/internal/renewal"
+	"github.com/opendatahub-io/ai-metering-service/internal/balance"
 )
 
 type HealthHandler struct {
-	renewer *renewal.Renewer
+	renewer *balance.Renewer
 }
 
-func NewHealthHandler(renewer *renewal.Renewer) *HealthHandler {
+func NewHealthHandler(renewer *balance.Renewer) *HealthHandler {
 	return &HealthHandler{renewer: renewer}
 }
 
