@@ -27,15 +27,22 @@ type UsageQuery struct {
 	Model       string
 	Provider    string
 	Budget      string
+	OrderBy     string
+	Direction   string
 	Limit       int
 	Offset      int
 }
 
 type UsageResult struct {
-	Range       UsageRange    `json:"range"`
-	Granularity string        `json:"granularity"`
-	GroupBy     []string      `json:"group_by"`
-	Data        []UsageBucket `json:"data"`
+	Range       UsageRange `json:"range"`
+	Granularity string     `json:"granularity"`
+	GroupBy     []string   `json:"group_by"`
+	// Total is the number of groups the query produced, before the
+	// limit truncated the rows. len(data) < total means the response is
+	// a truncated view — page (offset) or raise limit to see the rest.
+	// Zero with empty data means the query matched nothing.
+	Total int64         `json:"total"`
+	Data  []UsageBucket `json:"data"`
 }
 
 type UsageRange struct {

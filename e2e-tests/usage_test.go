@@ -294,6 +294,10 @@ func TestEvents_Ingest100(t *testing.T) {
 			t.Fatalf("expected %d model groups, got %d", len(models), len(data))
 		}
 
+		if got := int64(result["total"].(float64)); got != int64(len(models)) {
+			t.Errorf("total groups: expected %d, got %d", len(models), got)
+		}
+
 		var totalRequests, totalBUCost int64
 		for _, item := range data {
 			row := item.(map[string]any)
@@ -416,6 +420,38 @@ func TestEvents_Ingest100(t *testing.T) {
 			t.Errorf("budget bu_cost: expected %d, got %d", expectedBUCost, cost)
 		}
 		t.Logf("budget %s: %d requests, %d BU cost", budgetID, requests, cost)
+	})
+
+	// --- Query: order_by with a time granularity — the bucket leads, so
+	// the series stays chronological and the metric ranks the groups
+	// within each bucket.
+	t.Run("daily_by_model_order_by_cost", func(t *testing.T) {
+		resp := doRequest(t, "GET", "/api/v1/usage?range=30d&granularity=day&group_by=model&order_by=bu_cost", nil)
+		requireStatus(t, resp, http.StatusOK)
+		var result map[string]any
+		json.Unmarshal(readBody(t, resp), &result)
+
+		data := result["data"].([]any)
+		if len(data) < 2 {
+			t.Fatalf("expected multiple day/model cells, got %d", len(data))
+		}
+		var lastBucket string
+		var lastCost float64
+		for i, item := range data {
+			row := item.(map[string]any)
+			bucket := row["bucket"].(string)
+			cost := row["bu_cost"].(float64)
+			if i > 0 {
+				if bucket < lastBucket {
+					t.Fatalf("buckets out of chronological order at row %d: %s after %s", i, bucket, lastBucket)
+				}
+				if bucket == lastBucket && cost > lastCost {
+					t.Fatalf("within bucket %s, bu_cost increased: %v after %v", bucket, cost, lastCost)
+				}
+			}
+			lastBucket, lastCost = bucket, cost
+		}
+		t.Logf("daily ordered cells: %d, chronology and per-bucket ranking hold", len(data))
 	})
 
 	// --- Query: filtered by budget — flat totals for that budget's charges.
@@ -571,6 +607,56 @@ func TestUsage_UnmeteredEvents(t *testing.T) {
 
 	// --- a dimension that cannot be embedded in SQL is rejected
 	resp = doRequest(t, "GET", "/api/v1/usage?range=30d&group_by=model'--", nil)
+	requireStatus(t, resp, http.StatusBadRequest)
+	resp.Body.Close()
+
+	// --- order_by: the top-N leaderboard. The covered model cost 200 BU
+	// across 2 requests; the uncovered model 0 across 1. Descending by
+	// cost puts the covered model first; limit=1 yields the top group.
+	resp = doRequest(t, "GET", "/api/v1/usage?range=30d&group_by=model&order_by=bu_cost", nil)
+	requireStatus(t, resp, http.StatusOK)
+	json.Unmarshal(readBody(t, resp), &result)
+	data = result["data"].([]any)
+	if len(data) != 2 {
+		t.Fatalf("expected 2 model groups, got %d", len(data))
+	}
+	first := data[0].(map[string]any)
+	if first["dimensions"].(map[string]any)["model"] != "e2e-covered-model" {
+		t.Errorf("order_by=bu_cost desc: first group = %v, want e2e-covered-model", first["dimensions"])
+	}
+	if got := int64(first["bu_cost"].(float64)); got != 200 {
+		t.Errorf("top group bu_cost = %d, want 200", got)
+	}
+
+	resp = doRequest(t, "GET", "/api/v1/usage?range=30d&group_by=model&order_by=bu_cost&direction=asc", nil)
+	requireStatus(t, resp, http.StatusOK)
+	json.Unmarshal(readBody(t, resp), &result)
+	data = result["data"].([]any)
+	if data[0].(map[string]any)["dimensions"].(map[string]any)["model"] != "e2e-uncovered-model" {
+		t.Errorf("order_by=bu_cost asc: first group = %v, want e2e-uncovered-model", data[0].(map[string]any)["dimensions"])
+	}
+
+	resp = doRequest(t, "GET", "/api/v1/usage?range=30d&group_by=model&order_by=bu_cost&limit=1", nil)
+	requireStatus(t, resp, http.StatusOK)
+	json.Unmarshal(readBody(t, resp), &result)
+	data = result["data"].([]any)
+	if len(data) != 1 || data[0].(map[string]any)["dimensions"].(map[string]any)["model"] != "e2e-covered-model" {
+		t.Errorf("order_by + limit=1: expected only the top group, got %v", data)
+	}
+	// Truncation is detectable: total reports the full group count even
+	// though limit returned one row.
+	if got := int64(result["total"].(float64)); got != 2 {
+		t.Errorf("total groups with limit=1: expected 2, got %d", got)
+	}
+
+	// --- invalid order_by / direction are rejected
+	resp = doRequest(t, "GET", "/api/v1/usage?range=30d&group_by=model&order_by=foo", nil)
+	requireStatus(t, resp, http.StatusBadRequest)
+	resp.Body.Close()
+	resp = doRequest(t, "GET", "/api/v1/usage?range=30d&group_by=model&order_by=bu_cost&direction=down", nil)
+	requireStatus(t, resp, http.StatusBadRequest)
+	resp.Body.Close()
+	resp = doRequest(t, "GET", "/api/v1/usage?range=30d&group_by=model&direction=desc", nil)
 	requireStatus(t, resp, http.StatusBadRequest)
 	resp.Body.Close()
 }

@@ -620,6 +620,27 @@ paths:
           description: |
             Filter by budget id: the result aggregates the events charged
             to that budget, with bu_cost being the budget's charges.
+        - name: order_by
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [bu_cost, requests]
+          description: |
+            Sort groups by an aggregate metric instead of the group keys —
+            with the existing `limit`, this is the top-N leaderboard (top
+            consumers, top models). Defaults to descending when set. With
+            a time granularity the bucket leads: the series stays
+            chronological (oldest to newest) and the metric ranks the
+            groups within each bucket, so charting code can consume rows
+            in arrival order.
+        - name: direction
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [asc, desc]
+          description: Sort direction for `order_by`; default `desc`. Requires `order_by`.
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Offset"
       responses:
@@ -724,6 +745,27 @@ paths:
           schema:
             type: string
           description: Filter by provider.
+        - name: order_by
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [bu_cost, requests]
+          description: |
+            Sort groups by an aggregate metric instead of the group keys —
+            with the existing `limit`, this is the top-N leaderboard (top
+            consumers, top models). Defaults to descending when set. With
+            a time granularity the bucket leads: the series stays
+            chronological (oldest to newest) and the metric ranks the
+            groups within each bucket, so charting code can consume rows
+            in arrival order.
+        - name: direction
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [asc, desc]
+          description: Sort direction for `order_by`; default `desc`. Requires `order_by`.
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Offset"
       responses:
@@ -1209,6 +1251,14 @@ components:
             to:
               type: string
           description: The resolved window (dates).
+        total:
+          type: integer
+          format: int64
+          description: |
+            The number of groups the query produced, before the limit
+            truncated the rows. `len(data) < total` means the response is
+            a truncated view — page (offset) or raise limit to see the
+            rest. Zero with empty data means the query matched nothing.
         granularity:
           type: string
         group_by:

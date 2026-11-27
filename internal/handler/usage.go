@@ -26,6 +26,10 @@ func (h *UsageHandler) Query(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, err)
 		return
 	}
+	if err := validateOrderBy(query.OrderBy, query.Direction); err != nil {
+		c.JSON(http.StatusBadRequest, err)
+		return
+	}
 	result, err := h.store.QueryUsage(c.Request.Context(), getTenantID(c), query)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, api.NewError(api.ErrCannotQueryUsage, err.Error()))
@@ -47,6 +51,10 @@ func (h *UsageHandler) QueryMe(c *gin.Context) {
 		}
 	}
 	if err := validateGroupBy(query.GroupBy); err != nil {
+		c.JSON(http.StatusBadRequest, err)
+		return
+	}
+	if err := validateOrderBy(query.OrderBy, query.Direction); err != nil {
 		c.JSON(http.StatusBadRequest, err)
 		return
 	}
@@ -86,6 +94,33 @@ func validateGroupBy(groupBy []string) *api.Error {
 	return nil
 }
 
+// orderMetrics are the aggregate metrics order_by accepts — an allowlist,
+// because the value is embedded in the store's SQL.
+var orderMetrics = map[string]bool{"bu_cost": true, "requests": true}
+
+// validateOrderBy rejects any order_by/direction pair that is not exactly
+// one of the supported spellings. Direction defaults to descending: the
+// top-N leaderboard is the point of ordering by a metric.
+func validateOrderBy(orderBy, direction string) *api.Error {
+	if orderBy == "" {
+		if direction != "" {
+			return api.NewError(api.ErrBadRequest, "direction requires order_by")
+		}
+		return nil
+	}
+	if !orderMetrics[orderBy] {
+		return api.NewError(api.ErrBadRequest,
+			fmt.Sprintf("invalid order_by %q: must be one of bu_cost, requests", orderBy))
+	}
+	switch direction {
+	case "", "asc", "desc":
+		return nil
+	default:
+		return api.NewError(api.ErrBadRequest,
+			fmt.Sprintf("invalid direction %q: must be asc or desc", direction))
+	}
+}
+
 func buildUsageQuery(c *gin.Context) *api.UsageQuery {
 	pg := utils.ParsePagination(c)
 
@@ -106,6 +141,8 @@ func buildUsageQuery(c *gin.Context) *api.UsageQuery {
 		Model:       c.Query("model"),
 		Provider:    c.Query("provider"),
 		Budget:      c.Query("budget"),
+		OrderBy:     c.Query("order_by"),
+		Direction:   c.Query("direction"),
 		Limit:       pg.Limit,
 		Offset:      pg.Offset,
 	}

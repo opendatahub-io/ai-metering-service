@@ -927,6 +927,12 @@ func (s *PGStore) QueryUsage(ctx context.Context, tenantID string, query *api.Us
 		"count(*) AS requests",
 		"jsonb_sum_agg(usage) AS usage_agg",
 		"sum(bu_cost) AS bu_cost",
+		// The group count before the limit truncates rows — a window
+		// function, so it rides the same scan (a separate COUNT would run
+		// the whole aggregation twice). Window functions evaluate before
+		// LIMIT, so each row carries the untruncated total and the client
+		// can detect truncation: len(data) < total.
+		"COUNT(*) OVER () AS total_groups",
 	)
 
 	where := []string{"tenant_id = $1", `"timestamp" >= $2`, `"timestamp" <= $3`}
@@ -978,7 +984,34 @@ func (s *PGStore) QueryUsage(ctx context.Context, tenantID string, query *api.Us
 		") per_event"
 	if len(outerGroup) > 0 {
 		q += " GROUP BY " + strings.Join(outerGroup, ", ")
-		q += " ORDER BY " + strings.Join(outerGroup, ", ")
+		// Default ordering is the group keys (deterministic pagination).
+		// order_by sorts by an aggregate metric — the top-N leaderboard —
+		// with the group keys as the tiebreaker so pages stay stable. With
+		// a time granularity the bucket leads: the series stays
+		// chronological (oldest to newest) and the metric ranks the groups
+		// within each bucket, so charting code can consume rows in
+		// arrival order. The value is handler-validated against an
+		// allowlist (bu_cost, requests) before it reaches SQL.
+		orderBy := strings.Join(outerGroup, ", ")
+		if query.OrderBy != "" {
+			direction := "DESC"
+			if query.Direction == "asc" {
+				direction = "ASC"
+			}
+			metric := query.OrderBy + " " + direction
+			if bucketExpr != "" {
+				// outerGroup[0] is the bucket; keep it first.
+				dims := strings.Join(outerGroup[1:], ", ")
+				if dims != "" {
+					orderBy = "bucket, " + metric + ", " + dims
+				} else {
+					orderBy = "bucket, " + metric
+				}
+			} else {
+				orderBy = metric + ", " + orderBy
+			}
+		}
+		q += " ORDER BY " + orderBy
 	}
 
 	limit := query.Limit
@@ -997,6 +1030,7 @@ func (s *PGStore) QueryUsage(ctx context.Context, tenantID string, query *api.Us
 	defer rows.Close()
 
 	var data []api.UsageBucket
+	var total int64
 	for rows.Next() {
 		var b api.UsageBucket
 		var usageJSON []byte
@@ -1010,7 +1044,7 @@ func (s *PGStore) QueryUsage(ctx context.Context, tenantID string, query *api.Us
 			var dim string
 			scanArgs = append(scanArgs, &dim)
 		}
-		scanArgs = append(scanArgs, &b.Requests, &usageJSON, &b.BUCost)
+		scanArgs = append(scanArgs, &b.Requests, &usageJSON, &b.BUCost, &total)
 
 		if err := rows.Scan(scanArgs...); err != nil {
 			return nil, err
@@ -1040,6 +1074,7 @@ func (s *PGStore) QueryUsage(ctx context.Context, tenantID string, query *api.Us
 		Range:       api.UsageRange{From: from.Format("2006-01-02"), To: to.Format("2006-01-02")},
 		Granularity: granularity,
 		GroupBy:     query.GroupBy,
+		Total:       total,
 		Data:        data,
 	}, nil
 }
